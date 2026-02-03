@@ -13,8 +13,7 @@ from time import perf_counter
 
 import jax
 import jax.numpy as jnp
-
-from src.listeners.coarse_graining_calculation.coarse_graining_constants import (
+from coarse_graining_constants import (
     C_FORCE_KEY,
     C_NORMAL_KEY,
     C_POS_KEY,
