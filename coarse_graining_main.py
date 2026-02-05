@@ -34,23 +34,10 @@ from coarse_graining_gpu import (
 # Constants
 INT_32_MAX = jnp.iinfo(jnp.int32).max
 
-# Expected input keys
-INPUT_KEYS = (
-    C_FORCE_KEY,
-    C_NORMAL_KEY,
-    C_POS_KEY,
-    C_TANGENT_U_KEY,
-    C_TANGENT_V_KEY,
-    P_DISP_KEY,
-    P_POS_KEY,
-    P_VEL_KEY,
-    P_MASS_KEY,
-)
-
 
 class CoarseGrainingMain:
     """
-    A coarse graining listener class intended to be used with AGX Dynamics.
+    A coarse graining main class
     """
 
     MARGIN = 5  # Margin to determine how large buffer to use for the number of contacts
