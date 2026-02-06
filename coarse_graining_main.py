@@ -11,11 +11,6 @@ from math import pi
 
 # AGX imports
 import jax
-
-# Enable 64-bit precision if true
-if int(os.environ.get("USE_64_BIT_PRECISION", "0")):
-    jax.config.update("jax_enable_x64", True)
-
 import jax.numpy as jnp
 
 from coarse_graining_gpu import (
@@ -40,6 +35,17 @@ class CoarseGrainingMain:
     A coarse graining main class
     """
 
+    REQUIRED_KEYS = {
+        P_POS_KEY,
+        P_MASS_KEY,
+        P_VEL_KEY,
+        P_DISP_KEY,
+        C_FORCE_KEY,
+        C_NORMAL_KEY,
+        C_TANGENT_U_KEY,
+        C_TANGENT_V_KEY,
+        C_POS_KEY,
+    }
     MARGIN = 5  # Margin to determine how large buffer to use for the number of contacts
     PARTICLE_PACKING_DENSITY = 0.75
 
@@ -67,7 +73,7 @@ class CoarseGrainingMain:
         """
 
         self.gridpoints = gridpoints
-        self.number_of_gridpoints = self.grid_points.shape[0]
+        self.number_of_gridpoints = self.gridpoints.shape[0]
 
         # Parameters
         self.params = {
@@ -104,14 +110,15 @@ class CoarseGrainingMain:
             fields: a dictionary of buffers with the coarse grained fields calculated. The keys are defined
                     in "coarse_graining_constants.py". In addition, the gridpoints are included.
         """
+        input_buffers = self._validate_input_buffers(input_buffers)
         input_buffers = self._domainCutoff(input_buffers)
         args = {**input_buffers, **self.params}
         fields = coarseGrainingFields(
-            jnp.array(self.gridPoints, dtype=jnp.float32),
+            jnp.array(self.gridpoints, dtype=jnp.float32),
             args,
             batch_size=self.cg_batch_size,
         )
-        return {"gridpoints": self.gridpoints, **fields}
+        return fields
 
     def update_gridpoints(self, gridpoints, max_num_particles=None):
         """
@@ -127,6 +134,12 @@ class CoarseGrainingMain:
             self.maxNumParticles = max_num_particles
         else:
             self.maxNumParticles = self._estimateMaxNumParticles()
+
+    def set_particle_diameter(self, particle_diameter):
+        self.params["particleDiameter"] = particle_diameter
+
+    def set_smoothing_length(self, smoothing_length):
+        self.params["smoothingLength"] = smoothing_length
 
     def _estimateMaxNumParticles(self):
         """
@@ -198,6 +211,15 @@ class CoarseGrainingMain:
                 C_TANGENT_V_KEY,
             ]:
                 input_buffers[key] = jittedTake(buffer, contactIndices)
+        return input_buffers
+
+    def _validate_input_buffers(self, input_buffers):
+        missing_keys = self.REQUIRED_KEYS - input_buffers.keys()
+        input_buffers = {
+            k: input_buffers[k] for k in self.REQUIRED_KEYS if k in input_buffers
+        }
+        if missing_keys:
+            raise KeyError(f"Missing required keys: {missing_keys}")
         return input_buffers
 
 

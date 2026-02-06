@@ -416,6 +416,7 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         "heavisideScale": 1.0 / ((2.0 * R) ** 3),
     }
     args = {**args, **constants}
+    args[P_MASS_KEY] = args[P_MASS_KEY].flatten()
 
     # Batches over gridpoints using jax.lax.scan
     x_size = gridPoints.shape[0]
