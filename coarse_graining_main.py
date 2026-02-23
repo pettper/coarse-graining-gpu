@@ -32,7 +32,7 @@ INT_32_MAX = jnp.iinfo(jnp.int32).max
 
 class CoarseGrainingMain:
     """
-    A coarse graining main class
+    A coarse graining main class.
     """
 
     REQUIRED_KEYS = {
@@ -73,7 +73,6 @@ class CoarseGrainingMain:
         """
 
         self.gridpoints = gridpoints
-        self.number_of_gridpoints = self.gridpoints.shape[0]
 
         # Parameters
         self.params = {
