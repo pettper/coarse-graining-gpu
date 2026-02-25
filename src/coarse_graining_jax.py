@@ -401,10 +401,10 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         fields: a dictionary containing all the computed fields. Keys are defined
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
-
-    assert int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")) < 0.75 * (
+    
+    assert not int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")) < (0.75 * (
         (3 * args["smoothingLength"]) ** 3
-    ) / ((0.5 * args["particleDiameter"]) ** 3), (
+    ) / ((0.5 * args["particleDiameter"]) ** 3)), (
         f"clipped number of particles {int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}, is likely smaller than actual number included in |x| < 3*smoothingLength. Increase NUM_CUTOFF_PARTICLES or decrease the smoothingLength."
     )
 

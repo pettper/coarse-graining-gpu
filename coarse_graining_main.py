@@ -7,7 +7,7 @@
 # 2025-12-04: First public version, programmed by Petter Persson.
 import os
 from functools import partial
-from math import pi
+from math import pi, ceil
 
 # AGX imports
 import jax
@@ -82,7 +82,7 @@ class CoarseGrainingMain:
 
         # Determine the number of particles to include when approximating the cutoff |x| > 3*R. Passed as an environment variable to the function 'coarseGrainingAtPosition' for performance reasons.
         os.environ["NUM_CUTOFF_PARTICLES"] = str(
-            int(0.75 * (3 * smoothing_length) ** 3 / ((0.5 * particle_diameter) ** 3))
+            ceil(0.75 * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3))
         )
 
         # maxNumParticles = rough estimate of number of spheres that fit inside the grid domain limits + 3*smoothingLengths
