@@ -401,10 +401,12 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         fields: a dictionary containing all the computed fields. Keys are defined
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
-    
-    assert not int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")) < (0.75 * (
-        (3 * args["smoothingLength"]) ** 3
-    ) / ((0.5 * args["particleDiameter"]) ** 3)), (
+
+    assert not int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")) < (
+        0.75
+        * ((3 * args["smoothingLength"]) ** 3)
+        / ((0.5 * args["particleDiameter"]) ** 3)
+    ), (
         f"clipped number of particles {int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}, is likely smaller than actual number included in |x| < 3*smoothingLength. Increase NUM_CUTOFF_PARTICLES or decrease the smoothingLength."
     )
 
@@ -420,23 +422,33 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
 
     # Batches over gridpoints using jax.lax.scan
     x_size = gridPoints.shape[0]
-    num_splits = x_size // batch_size + 1
-    x_splits = jnp.split(gridPoints[: (num_splits - 1) * batch_size], num_splits - 1)
-    x_splits.append(gridPoints[(num_splits - 1) * batch_size :])
+    num_splits = x_size // batch_size
+    if num_splits <= 0:
+        x_splits = [gridPoints]  # No splitting required
+    else:
+        x_splits = jnp.split(gridPoints[: (num_splits) * batch_size], num_splits)
+        x_splits.append(gridPoints[(num_splits) * batch_size :])
 
-    # handle splits of equal size
-    _, result_dict = jax.lax.scan(
-        coarse_graining_body,
-        args,
-        jnp.stack(x_splits[:-1]),
-    )
-
-    # handle remainder
-    _, result_dict_rem = jax.lax.scan(
-        coarse_graining_body,
-        args,
-        jnp.stack(x_splits[-1][None, :, :]),
-    )
+    if len(x_splits) > 1:
+        # handle splits of equal size
+        _, result_dict = jax.lax.scan(
+            coarse_graining_body,
+            args,
+            jnp.stack(x_splits[:-1]),
+        )
+        # handle remainder
+        _, result_dict_rem = jax.lax.scan(
+            coarse_graining_body,
+            args,
+            jnp.stack(x_splits[-1][None, :, :]),
+        )
+    else:
+        _, result_dict = jax.lax.scan(
+            coarse_graining_body,
+            args,
+            jnp.stack(x_splits[-1][None, :, :]),
+        )
+        result_dict_rem = {k: jnp.array([]) for k in result_dict.keys()}
 
     cg_result = {}
     for key, arr in result_dict.items():
