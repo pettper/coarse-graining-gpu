@@ -148,6 +148,8 @@ class CoarseGrainingMain:
             self.maxNumParticles = max_num_particles
         else:
             self.maxNumParticles = self._estimateMaxNumParticles()
+        if self.debug_prints_on:
+            print(f"self.maxNumParticles={self.maxNumParticles}")
 
     def set_particle_diameter(self, particle_diameter):
         self.params["particleDiameter"] = particle_diameter
