@@ -424,31 +424,26 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
     x_size = gridPoints.shape[0]
     num_splits = x_size // batch_size
     if num_splits <= 0:
-        x_splits = [gridPoints]  # No splitting required
-    else:
-        x_splits = jnp.split(gridPoints[: (num_splits) * batch_size], num_splits)
-        x_splits.append(gridPoints[(num_splits) * batch_size :])
-
-    if len(x_splits) > 1:
-        # handle splits of equal size
+        # No splitting, just pass the whole array but add one axis for compatability.
         _, result_dict = jax.lax.scan(
             coarse_graining_body,
             args,
-            jnp.stack(x_splits[:-1]),
+            gridPoints[None, :, :],
         )
-        # handle remainder
+        result_dict_rem = {k: jnp.array([]) for k in result_dict.keys()}
+    else:
+        # First part, gridPoints is reshaped to (num_splits, batch_size, 3)
+        _, result_dict = jax.lax.scan(
+            coarse_graining_body,
+            args,
+            gridPoints[: (num_splits) * batch_size].reshape(num_splits, batch_size, 3),
+        )
+        # Remaining part, add one axis for compatability.
         _, result_dict_rem = jax.lax.scan(
             coarse_graining_body,
             args,
-            jnp.stack(x_splits[-1][None, :, :]),
+            gridPoints[None, (num_splits) * batch_size :],
         )
-    else:
-        _, result_dict = jax.lax.scan(
-            coarse_graining_body,
-            args,
-            jnp.stack(x_splits[-1][None, :, :]),
-        )
-        result_dict_rem = {k: jnp.array([]) for k in result_dict.keys()}
 
     cg_result = {}
     for key, arr in result_dict.items():
