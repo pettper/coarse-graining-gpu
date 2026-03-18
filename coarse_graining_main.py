@@ -124,6 +124,7 @@ class CoarseGrainingMain:
 
         if self.debug_prints_on:
             print("Input buffer sizes")
+            print(f"gridPoints: {self.gridpoints.shape}")
             for k, v in input_buffers.items():
                 print(f"{k}: {v.shape}")
 

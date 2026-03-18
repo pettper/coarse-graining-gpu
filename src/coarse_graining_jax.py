@@ -423,6 +423,7 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
     # Batches over gridpoints using jax.lax.scan
     x_size = gridPoints.shape[0]
     num_splits = x_size // batch_size
+    rem_size = x_size % batch_size
     if num_splits <= 0:
         # No splitting, just pass the whole array but add one axis for compatability.
         _, result_dict = jax.lax.scan(
@@ -439,11 +440,14 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
             gridPoints[: (num_splits) * batch_size].reshape(num_splits, batch_size, 3),
         )
         # Remaining part, add one axis for compatability.
-        _, result_dict_rem = jax.lax.scan(
-            coarse_graining_body,
-            args,
-            gridPoints[None, (num_splits) * batch_size :],
-        )
+        if rem_size > 0:
+            _, result_dict_rem = jax.lax.scan(
+                coarse_graining_body,
+                args,
+                gridPoints[None, (num_splits) * batch_size :],
+            )
+        else:
+            result_dict_rem = {k: jnp.array([]) for k in result_dict.keys()}
 
     cg_result = {}
     for key, arr in result_dict.items():
