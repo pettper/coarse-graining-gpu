@@ -123,7 +123,7 @@ class CoarseGrainingMain:
         args = {**input_buffers, **self.params}
 
         if self.debug_prints_on:
-            print("Input buffer sizes")
+            print("\nInput buffer sizes")
             print(f"gridPoints: {self.gridpoints.shape}")
             for k, v in input_buffers.items():
                 print(f"{k}: {v.shape}")
@@ -150,6 +150,7 @@ class CoarseGrainingMain:
         else:
             self.maxNumParticles = self._estimateMaxNumParticles()
         if self.debug_prints_on:
+            print("\nUPDATED GRIDPOINTS")
             print(f"self.maxNumParticles={self.maxNumParticles}")
 
     def set_particle_diameter(self, particle_diameter):
