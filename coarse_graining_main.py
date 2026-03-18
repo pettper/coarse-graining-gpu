@@ -56,6 +56,7 @@ class CoarseGrainingMain:
         particle_diameter,
         cg_batch_size=100,
         max_num_particles=None,
+        debug_prints_on=False,
     ):
         """
         CALL SEQUENCE: cg_listener = CoarseGrainingListenerJAX(
@@ -73,6 +74,8 @@ class CoarseGrainingMain:
         """
 
         self.gridpoints = gridpoints
+        self.cg_batch_size = cg_batch_size
+        self.debug_prints_on = debug_prints_on
 
         # Parameters
         self.params = {
@@ -86,6 +89,10 @@ class CoarseGrainingMain:
                 0.75 * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3)
             )
         )
+        if self.debug_prints_on:
+            print(
+                f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}"
+            )
 
         # maxNumParticles = rough estimate of number of spheres that fit inside the grid domain limits + 3*smoothingLengths
         if max_num_particles:
@@ -93,8 +100,8 @@ class CoarseGrainingMain:
         else:
             self.maxNumParticles = self._estimateMaxNumParticles()
         self.inputBuffers = {}
-
-        self.cg_batch_size = cg_batch_size
+        if self.debug_prints_on:
+            print(f"self.maxNumParticles={self.maxNumParticles}")
 
         return
 
@@ -114,6 +121,12 @@ class CoarseGrainingMain:
         input_buffers = self._validate_input_buffers(input_buffers)
         input_buffers = self._domainCutoff(input_buffers)
         args = {**input_buffers, **self.params}
+
+        if self.debug_prints_on:
+            print("Input buffer sizes")
+            for k, v in input_buffers.items():
+                print(f"{k}: {v.shape}")
+
         fields = coarseGrainingFields(
             jnp.array(self.gridpoints, dtype=jnp.float32),
             args,
