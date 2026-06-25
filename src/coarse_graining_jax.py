@@ -263,10 +263,10 @@ def coarseGrainingFieldsAtPosition(
 
     pressure = jnp.multiply(-0.333333333333, jnp.trace(stressTensor))
 
-    # von mises stress = sqrt(3.0/2.0*(stress_ij * stress_ij - 3*pressure ** 2))
+    # von mises stress = sqrt(3.0/2.0*(stress_ij * stress_ij - 3*pressure ** 2)), this expression has been simplified
     vonMisesStress = jnp.sqrt(
         jnp.multiply(
-            1.666666666667,
+            1.5,
             jnp.subtract(
                 jnp.einsum("jk,jk->", stressTensor, stressTensor),
                 jnp.multiply(3.0, jnp.square(pressure)),
