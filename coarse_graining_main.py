@@ -85,10 +85,14 @@ class CoarseGrainingMain:
 
         # Determine the number of particles to include when approximating the cutoff |x| > 3*R. Passed as an environment variable to the function 'coarseGrainingAtPosition' for performance reasons.
         os.environ["NUM_CUTOFF_PARTICLES"] = str(
-            ceil(0.75 * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3))
+            ceil(
+                0.75 * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3)
+            )
         )
         if self.debug_prints_on:
-            print(f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}")
+            print(
+                f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}"
+            )
 
         # maxNumParticles = rough estimate of number of spheres that fit inside the grid domain limits + 3*smoothingLengths
         if max_num_particles:
@@ -174,11 +178,19 @@ class CoarseGrainingMain:
             "zmin": mins[2],
             "zmax": maxs[2],
         }
-        sizeX = (limits["xmax"] + 3.0 * smoothing_length) - (limits["xmin"] - 3.0 * smoothing_length)
-        sizeY = (limits["ymax"] + 3.0 * smoothing_length) - (limits["ymin"] - 3.0 * smoothing_length)
-        sizeZ = (limits["zmax"] + 3.0 * smoothing_length) - (limits["zmin"] - 3.0 * smoothing_length)
+        sizeX = (limits["xmax"] + 3.0 * smoothing_length) - (
+            limits["xmin"] - 3.0 * smoothing_length
+        )
+        sizeY = (limits["ymax"] + 3.0 * smoothing_length) - (
+            limits["ymin"] - 3.0 * smoothing_length
+        )
+        sizeZ = (limits["zmax"] + 3.0 * smoothing_length) - (
+            limits["zmin"] - 3.0 * smoothing_length
+        )
         gridVolume = sizeX * sizeY * sizeZ
-        particleVolume = (4.0 / 3.0) * pi * ((0.5 * self.params["particleDiameter"]) ** 3)
+        particleVolume = (
+            (4.0 / 3.0) * pi * ((0.5 * self.params["particleDiameter"]) ** 3)
+        )
         return int(self.PARTICLE_PACKING_DENSITY * (gridVolume / particleVolume))
 
     def _domainCutoff(self, input_buffers):
@@ -197,7 +209,9 @@ class CoarseGrainingMain:
             "zmax": maxs[2] + 3.0 * smoothing_length,
         }
 
-        particleIndices = jittedCutoffIndices(input_buffers[P_POS_KEY], limits, size=self.maxNumParticles)
+        particleIndices = jittedCutoffIndices(
+            input_buffers[P_POS_KEY], limits, size=self.maxNumParticles
+        )
         contactIndices = jittedCutoffIndices(
             input_buffers[C_POS_KEY],
             limits,
@@ -219,14 +233,15 @@ class CoarseGrainingMain:
 
     def _validate_input_buffers(self, input_buffers):
         missing_keys = self.REQUIRED_KEYS - input_buffers.keys()
-        input_buffers = {k: input_buffers[k] for k in self.REQUIRED_KEYS if k in input_buffers}
+        input_buffers = {
+            k: input_buffers[k] for k in self.REQUIRED_KEYS if k in input_buffers
+        }
         if missing_keys:
             raise KeyError(f"Missing required keys: {missing_keys}")
         return input_buffers
 
 
-# @partial(jax.jit, static_argnames=["size"])
-@jax.jit
+@partial(jax.jit, static_argnames=["size"])
 def jittedCutoffIndices(particlePos, limits, size):
     """
     Finds indexes of particle inside the grid limits.
