@@ -12,6 +12,7 @@ from math import ceil, pi
 # AGX imports
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from coarse_graining_gpu import (
     C_FORCE_KEY,
@@ -25,9 +26,6 @@ from coarse_graining_gpu import (
     P_VEL_KEY,
     coarseGrainingFields,
 )
-
-# Constants
-INT_32_MAX = jnp.iinfo(jnp.int32).max
 
 
 class CoarseGrainingMain:
@@ -85,14 +83,10 @@ class CoarseGrainingMain:
 
         # Determine the number of particles to include when approximating the cutoff |x| > 3*R. Passed as an environment variable to the function 'coarseGrainingAtPosition' for performance reasons.
         os.environ["NUM_CUTOFF_PARTICLES"] = str(
-            ceil(
-                0.75 * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3)
-            )
+            ceil(0.75 * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3))
         )
         if self.debug_prints_on:
-            print(
-                f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}"
-            )
+            print(f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}")
 
         # maxNumParticles = rough estimate of number of spheres that fit inside the grid domain limits + 3*smoothingLengths
         if max_num_particles:
@@ -129,7 +123,7 @@ class CoarseGrainingMain:
                 print(f"{k}: {v.shape}")
 
         fields = coarseGrainingFields(
-            jnp.array(self.gridpoints, dtype=jnp.float32),
+            jnp.asarray(self.gridpoints),
             args,
             batch_size=self.cg_batch_size,
         )
@@ -178,49 +172,42 @@ class CoarseGrainingMain:
             "zmin": mins[2],
             "zmax": maxs[2],
         }
-        sizeX = (limits["xmax"] + 3.0 * smoothing_length) - (
-            limits["xmin"] - 3.0 * smoothing_length
-        )
-        sizeY = (limits["ymax"] + 3.0 * smoothing_length) - (
-            limits["ymin"] - 3.0 * smoothing_length
-        )
-        sizeZ = (limits["zmax"] + 3.0 * smoothing_length) - (
-            limits["zmin"] - 3.0 * smoothing_length
-        )
+        sizeX = (limits["xmax"] + 3.0 * smoothing_length) - (limits["xmin"] - 3.0 * smoothing_length)
+        sizeY = (limits["ymax"] + 3.0 * smoothing_length) - (limits["ymin"] - 3.0 * smoothing_length)
+        sizeZ = (limits["zmax"] + 3.0 * smoothing_length) - (limits["zmin"] - 3.0 * smoothing_length)
         gridVolume = sizeX * sizeY * sizeZ
-        particleVolume = (
-            (4.0 / 3.0) * pi * ((0.5 * self.params["particleDiameter"]) ** 3)
-        )
+        particleVolume = (4.0 / 3.0) * pi * ((0.5 * self.params["particleDiameter"]) ** 3)
         return int(self.PARTICLE_PACKING_DENSITY * (gridVolume / particleVolume))
 
     def _domainCutoff(self, input_buffers):
         """
         Removes particles that are outside the current grid.
         """
-        smoothing_length = self.params["smoothingLength"]
-        mins = self.gridpoints.min(axis=0)
-        maxs = self.gridpoints.max(axis=0)
-        limits = {
-            "xmin": mins[0] - 3.0 * smoothing_length,
-            "xmax": maxs[0] + 3.0 * smoothing_length,
-            "ymin": mins[1] - 3.0 * smoothing_length,
-            "ymax": maxs[1] + 3.0 * smoothing_length,
-            "zmin": mins[2] - 3.0 * smoothing_length,
-            "zmax": maxs[2] + 3.0 * smoothing_length,
-        }
 
-        particleIndices = jittedCutoffIndices(
-            input_buffers[P_POS_KEY], limits, size=self.maxNumParticles
-        )
-        contactIndices = jittedCutoffIndices(
-            input_buffers[C_POS_KEY],
-            limits,
-            size=self.MARGIN * self.maxNumParticles,
-        )
+        def pick_indices(pos, mins, maxs, size):
+            """
+            Finds indexes of particle inside the grid limits.
+            Returns: A buffer of length 'size' containing the indices of particles/contacts inside 'limits'
+            """
+            return np.flatnonzero(np.all((pos >= mins) & (pos <= maxs), axis=1))[:size]
+
+        def gather_zero_padded(buffer, indices, size):
+            dtype = jax.dtypes.canonicalize_dtype(buffer.dtype)
+            out = np.zeros((size, *buffer.shape[1:]), dtype=dtype)
+            out[: indices.size] = buffer[indices]
+            return jnp.asarray(out)
+
+        smoothing_length = self.params["smoothingLength"]
+        mins = self.gridpoints.min(axis=0) - 3.0 * smoothing_length
+        maxs = self.gridpoints.max(axis=0) + 3.0 * smoothing_length
+        n_particles = self.maxNumParticles
+        n_contacts = self.MARGIN * n_particles
+        particleIndices = pick_indices(input_buffers[P_POS_KEY], mins, maxs, n_particles)
+        contactIndices = pick_indices(input_buffers[C_POS_KEY], mins, maxs, n_contacts)
 
         for key, buffer in input_buffers.items():
             if key in [P_POS_KEY, P_VEL_KEY, P_DISP_KEY, P_MASS_KEY]:
-                input_buffers[key] = jittedTake(buffer, particleIndices)
+                input_buffers[key] = gather_zero_padded(buffer, particleIndices, n_particles)
             elif key in [
                 C_FORCE_KEY,
                 C_POS_KEY,
@@ -228,52 +215,12 @@ class CoarseGrainingMain:
                 C_TANGENT_U_KEY,
                 C_TANGENT_V_KEY,
             ]:
-                input_buffers[key] = jittedTake(buffer, contactIndices)
+                input_buffers[key] = gather_zero_padded(buffer, contactIndices, n_contacts)
         return input_buffers
 
     def _validate_input_buffers(self, input_buffers):
         missing_keys = self.REQUIRED_KEYS - input_buffers.keys()
-        input_buffers = {
-            k: input_buffers[k] for k in self.REQUIRED_KEYS if k in input_buffers
-        }
+        input_buffers = {k: input_buffers[k] for k in self.REQUIRED_KEYS if k in input_buffers}
         if missing_keys:
             raise KeyError(f"Missing required keys: {missing_keys}")
         return input_buffers
-
-
-@partial(jax.jit, static_argnames=["size"])
-def jittedCutoffIndices(particlePos, limits, size):
-    """
-    Finds indexes of particle inside the grid limits.
-
-    Returns: A buffer of length 'size' containing the indices of particles/contacts inside 'limits'
-    """
-    mask = (
-        (particlePos[:, 0] >= limits["xmin"])
-        & (particlePos[:, 0] <= limits["xmax"])
-        & (particlePos[:, 1] >= limits["ymin"])
-        & (particlePos[:, 1] <= limits["ymax"])
-        & (particlePos[:, 2] >= limits["zmin"])
-        & (particlePos[:, 2] <= limits["zmax"])
-    )
-    # Fill with an out of bounds index
-    return jnp.nonzero(mask, size=size, fill_value=INT_32_MAX)[0]
-
-
-@jax.jit
-def jittedTake(buffer, indices):
-    """
-    Efficient array indexing along axis=0, fills out of bounds indices with floating point zeros.
-    This ensures that these values won't affect coarse graining calculations downstream.
-
-    Returns: A buffer of the same length as indices
-    """
-    return jnp.take(
-        buffer,
-        indices,
-        axis=0,
-        mode="fill",
-        fill_value=0.0,
-        indices_are_sorted=False,
-        unique_indices=True,
-    )
