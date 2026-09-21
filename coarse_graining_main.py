@@ -6,7 +6,6 @@
 #
 # 2025-12-04: First public version, programmed by Petter Persson.
 import os
-from functools import partial
 from math import ceil, pi
 
 # AGX imports
@@ -44,8 +43,8 @@ class CoarseGrainingMain:
         C_TANGENT_V_KEY,
         C_POS_KEY,
     }
-    MARGIN = 5  # Margin to determine how large buffer to use for the number of contacts
     PARTICLE_PACKING_DENSITY = 0.75
+    STANDARD_BUFFER_SIZE = 128
 
     def __init__(
         self,
@@ -83,19 +82,17 @@ class CoarseGrainingMain:
 
         # Determine the number of particles to include when approximating the cutoff |x| > 3*R. Passed as an environment variable to the function 'coarseGrainingAtPosition' for performance reasons.
         os.environ["NUM_CUTOFF_PARTICLES"] = str(
-            ceil(0.75 * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3))
+            ceil(self.PARTICLE_PACKING_DENSITY * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3))
         )
         if self.debug_prints_on:
             print(f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}")
 
-        # maxNumParticles = rough estimate of number of spheres that fit inside the grid domain limits + 3*smoothingLengths
-        if max_num_particles:
-            self.maxNumParticles = max_num_particles
-        else:
-            self.maxNumParticles = self._estimateMaxNumParticles()
-        self.inputBuffers = {}
+        # To handle adaptive buffer sizes
+        self.particle_buffer_size = self.STANDARD_BUFFER_SIZE
+        self.contact_buffer_size = self.STANDARD_BUFFER_SIZE
         if self.debug_prints_on:
-            print(f"self.maxNumParticles={self.maxNumParticles}")
+            print(f"Particle buffer size: {self.particle_buffer_size}")
+            print(f"Contact buffer size: {self.contact_buffer_size}")
 
         return
 
@@ -129,9 +126,9 @@ class CoarseGrainingMain:
         )
         return fields
 
-    def update_gridpoints(self, gridpoints, max_num_particles=None):
+    def update_gridpoints(self, gridpoints):
         """
-        This function is used to update the gridpoints. In addition, the max_num_particles must also be updated.
+        This function is used to update the gridpoints.
 
         INPUTS:
             gridpoints: New gridpoints stored in an nx3 array. The grid is assumed to be regular.
@@ -139,13 +136,6 @@ class CoarseGrainingMain:
                                 on the number of particles that fits inside the provided grid.
         """
         self.gridpoints = gridpoints
-        if max_num_particles:
-            self.maxNumParticles = max_num_particles
-        else:
-            self.maxNumParticles = self._estimateMaxNumParticles()
-        if self.debug_prints_on:
-            print("\nUPDATED GRIDPOINTS")
-            print(f"self.maxNumParticles={self.maxNumParticles}")
 
     def set_particle_diameter(self, particle_diameter):
         self.params["particleDiameter"] = particle_diameter
@@ -153,43 +143,17 @@ class CoarseGrainingMain:
     def set_smoothing_length(self, smoothing_length):
         self.params["smoothingLength"] = smoothing_length
 
-    def _estimateMaxNumParticles(self):
-        """
-        Function that estimates the maximum number of particles that needs to be allocated for the grid supplied by the user.
-        The estimate is based on sphere packing density, the grid volume, and the particle volume.
-        INPUTS:
-        OUTPUTS:
-            n: The recommended number of particles to allocate for the current grid.
-        """
-        smoothing_length = self.params["smoothingLength"]
-        mins = self.gridpoints.min(axis=0)
-        maxs = self.gridpoints.max(axis=0)
-        limits = {
-            "xmin": mins[0],
-            "xmax": maxs[0],
-            "ymin": mins[1],
-            "ymax": maxs[1],
-            "zmin": mins[2],
-            "zmax": maxs[2],
-        }
-        sizeX = (limits["xmax"] + 3.0 * smoothing_length) - (limits["xmin"] - 3.0 * smoothing_length)
-        sizeY = (limits["ymax"] + 3.0 * smoothing_length) - (limits["ymin"] - 3.0 * smoothing_length)
-        sizeZ = (limits["zmax"] + 3.0 * smoothing_length) - (limits["zmin"] - 3.0 * smoothing_length)
-        gridVolume = sizeX * sizeY * sizeZ
-        particleVolume = (4.0 / 3.0) * pi * ((0.5 * self.params["particleDiameter"]) ** 3)
-        return int(self.PARTICLE_PACKING_DENSITY * (gridVolume / particleVolume))
-
     def _domainCutoff(self, input_buffers):
         """
         Removes particles that are outside the current grid.
         """
 
-        def pick_indices(pos, mins, maxs, size):
+        def pick_indices(pos, mins, maxs):
             """
             Finds indexes of particle inside the grid limits.
             Returns: A buffer of length 'size' containing the indices of particles/contacts inside 'limits'
             """
-            return np.flatnonzero(np.all((pos >= mins) & (pos <= maxs), axis=1))[:size]
+            return np.flatnonzero(np.all((pos >= mins) & (pos <= maxs), axis=1))
 
         def gather_zero_padded(buffer, indices, size):
             dtype = jax.dtypes.canonicalize_dtype(buffer.dtype)
@@ -200,10 +164,9 @@ class CoarseGrainingMain:
         smoothing_length = self.params["smoothingLength"]
         mins = self.gridpoints.min(axis=0) - 3.0 * smoothing_length
         maxs = self.gridpoints.max(axis=0) + 3.0 * smoothing_length
-        n_particles = self.maxNumParticles
-        n_contacts = self.MARGIN * n_particles
-        particleIndices = pick_indices(input_buffers[P_POS_KEY], mins, maxs, n_particles)
-        contactIndices = pick_indices(input_buffers[C_POS_KEY], mins, maxs, n_contacts)
+        particleIndices = pick_indices(input_buffers[P_POS_KEY], mins, maxs)
+        contactIndices = pick_indices(input_buffers[C_POS_KEY], mins, maxs)
+        n_particles, n_contacts = self._set_buffer_sizes(particleIndices.size, contactIndices.size)
 
         for key, buffer in input_buffers.items():
             if key in [P_POS_KEY, P_VEL_KEY, P_DISP_KEY, P_MASS_KEY]:
@@ -224,3 +187,24 @@ class CoarseGrainingMain:
         if missing_keys:
             raise KeyError(f"Missing required keys: {missing_keys}")
         return input_buffers
+
+    def _set_buffer_sizes(self, num_particles, num_contacts):
+        """
+        Responsible for setting the number of particles and contacts that are stored in the buffer. Strictly increasing to avoid recompilation / cache problems.
+        """
+
+        def update_size(count, current_size, print_label=""):
+            new_size = ceil(count / self.STANDARD_BUFFER_SIZE) * self.STANDARD_BUFFER_SIZE
+            if new_size > current_size:
+                size = new_size
+                if self.debug_prints_on:
+                    print(f"Increasing {print_label} buffer size to {new_size}")
+            else:
+                size = current_size
+
+            return size
+
+        self.particle_buffer_size = update_size(num_particles, self.particle_buffer_size, "particle")
+        self.contact_buffer_size = update_size(num_contacts, self.contact_buffer_size, "contact")
+
+        return self.particle_buffer_size, self.contact_buffer_size

@@ -56,9 +56,7 @@ def filterParticles(x, p, v, u, m, smoothingLength, N):
         disp: filtered particle displacements.
         mass: filtered particle masses.
     """
-    negDistance2, idx = jax.lax.top_k(
-        jnp.negative(jnp.sum(jnp.square(jnp.subtract(x, p)), axis=1)), N
-    )
+    negDistance2, idx = jax.lax.top_k(jnp.negative(jnp.sum(jnp.square(jnp.subtract(x, p)), axis=1)), N)
     isValid = jnp.absolute(negDistance2) < 9 * smoothingLength * smoothingLength
     isValid = isValid.astype(jnp.uint8)
     return (
@@ -121,15 +119,11 @@ def computeKineticStress(M, particleVelocities):
     OUTPUTS:
         sigma: The kinetic stress tensor at a single gridpoint, size 3 x 3.
     """
-    return jnp.multiply(
-        -1.0, jnp.einsum("i,ij,ik->jk", M, particleVelocities, particleVelocities)
-    )
+    return jnp.multiply(-1.0, jnp.einsum("i,ij,ik->jk", M, particleVelocities, particleVelocities))
 
 
 @jax.jit
-def computeContactStress(
-    heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv
-):
+def computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv):
     """
     Computes the contact stress tensor according to eq. 22 in "Stress and strain in pseudo-particle solids.pdf".
     CALL SEQUENCE: sigma = computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv):
@@ -256,9 +250,7 @@ def coarseGrainingFieldsAtPosition(
     # stress tensor
     stressTensor = jnp.add(
         computeKineticStress(M, v),
-        computeContactStress(
-            heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv
-        ),
+        computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv),
     )
 
     pressure = jnp.multiply(-0.333333333333, jnp.trace(stressTensor))
@@ -403,12 +395,8 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
     """
 
     assert not int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")) < (
-        0.75
-        * ((3 * args["smoothingLength"]) ** 3)
-        / ((0.5 * args["particleDiameter"]) ** 3)
-    ), (
-        f"clipped number of particles {int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}, is likely smaller than actual number included in |x| < 3*smoothingLength. Increase NUM_CUTOFF_PARTICLES or decrease the smoothingLength."
-    )
+        0.75 * ((3 * args["smoothingLength"]) ** 3) / ((0.5 * args["particleDiameter"]) ** 3)
+    ), f"clipped number of particles {int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}, is likely smaller than actual number included in |x| < 3*smoothingLength. Increase NUM_CUTOFF_PARTICLES or decrease the smoothingLength."
 
     # Pre-compute some constants
     R = args["smoothingLength"]
@@ -460,17 +448,11 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
             F_PRESSURE_KEY,
             F_VON_MISES_KEY,
         ]:
-            cg_result[key] = jnp.concatenate(
-                (arr.ravel(), arr_rem.ravel()), axis=0
-            ).reshape(-1)
+            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1)
         elif key in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
-            cg_result[key] = jnp.concatenate(
-                (arr.ravel(), arr_rem.ravel()), axis=0
-            ).reshape(-1, 3)
+            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3)
         elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
-            cg_result[key] = jnp.concatenate(
-                (arr.ravel(), arr_rem.ravel()), axis=0
-            ).reshape(-1, 3, 3)
+            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
 
     return cg_result
 
@@ -497,30 +479,14 @@ if __name__ == "__main__":
 
     args = {}
     args["particleMass"] = m = jnp.linspace(0.0, 1000.0, np, dtype=jnp.float32)
-    args["particlePosition"] = jnp.linspace(
-        0.0, 1000.0, 3 * np, dtype=jnp.float32
-    ).reshape(np, 3)
-    args["particleVelocity"] = jnp.linspace(
-        0.0, 1000.0, 3 * np, dtype=jnp.float32
-    ).reshape(np, 3)
-    args["particleDisplacement"] = jnp.linspace(
-        0.0, 1000.0, 3 * np, dtype=jnp.float32
-    ).reshape(np, 3)
-    args["localContactForce"] = jnp.linspace(
-        0.0, 1000.0, 3 * nc, dtype=jnp.float32
-    ).reshape(nc, 3)
-    args["contactPosition"] = jnp.linspace(
-        0.0, 1000.0, 3 * nc, dtype=jnp.float32
-    ).reshape(nc, 3)
-    args["contactNormal"] = jnp.linspace(
-        0.0, 1000.0, 3 * nc, dtype=jnp.float32
-    ).reshape(nc, 3)
-    args["contactTangentU"] = jnp.linspace(
-        0.0, 1000.0, 3 * nc, dtype=jnp.float32
-    ).reshape(nc, 3)
-    args["contactTangentV"] = jnp.linspace(
-        0.0, 1000.0, 3 * nc, dtype=jnp.float32
-    ).reshape(nc, 3)
+    args["particlePosition"] = jnp.linspace(0.0, 1000.0, 3 * np, dtype=jnp.float32).reshape(np, 3)
+    args["particleVelocity"] = jnp.linspace(0.0, 1000.0, 3 * np, dtype=jnp.float32).reshape(np, 3)
+    args["particleDisplacement"] = jnp.linspace(0.0, 1000.0, 3 * np, dtype=jnp.float32).reshape(np, 3)
+    args["localContactForce"] = jnp.linspace(0.0, 1000.0, 3 * nc, dtype=jnp.float32).reshape(nc, 3)
+    args["contactPosition"] = jnp.linspace(0.0, 1000.0, 3 * nc, dtype=jnp.float32).reshape(nc, 3)
+    args["contactNormal"] = jnp.linspace(0.0, 1000.0, 3 * nc, dtype=jnp.float32).reshape(nc, 3)
+    args["contactTangentU"] = jnp.linspace(0.0, 1000.0, 3 * nc, dtype=jnp.float32).reshape(nc, 3)
+    args["contactTangentV"] = jnp.linspace(0.0, 1000.0, 3 * nc, dtype=jnp.float32).reshape(nc, 3)
     args["gaussianScale"] = 1.0 / ((sqrt(2.0 * pi) * smoothingLength) ** 3)
     args["gaussianKernelFactor"] = -0.5 / (smoothingLength * smoothingLength)
     args["heavisideScale"] = 8.0 * smoothingLength**3
@@ -529,8 +495,6 @@ if __name__ == "__main__":
 
     gridPoints = jnp.zeros((ng, 3), dtype=jnp.float32)
 
-    t, mean, std = measure(
-        lambda: coarseGrainingFields(gridPoints, args, batch_size=100)
-    )
+    t, mean, std = measure(lambda: coarseGrainingFields(gridPoints, args, batch_size=100))
     print(t)
     print(mean)
