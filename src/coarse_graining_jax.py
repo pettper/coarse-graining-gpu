@@ -64,6 +64,7 @@ def filterParticles(x, p, v, u, m, smoothingLength, N):
         jnp.multiply(isValid[:, None], v[idx, :]),
         jnp.multiply(isValid[:, None], u[idx, :]),
         jnp.multiply(isValid, m[idx]),
+        isValid,
     )
 
 
@@ -205,7 +206,7 @@ def coarseGrainingFieldsAtPosition(
     """
     Computes the coarse graining fields at a single gridpoint x. For general documentation,
     consult "Stress and strain in pseudo-particle solids.pdf".
-    CALL SEQUENCE: fields = computeGrainingFieldsAtPosition(x, p, v, u, m, cf, cp, cn, ctu, ctv,
+    CALL SEQUENCE: fields = coarseGrainingFieldsAtPosition(x, p, v, u, m, cf, cp, cn, ctu, ctv,
         gaussianKernelFactor, gaussianScale, heavisideScale, smoothingLength, particleDiameter)
     INPUTS:
         x: a gridpoint coordinate (x,y,z), size (3,).
@@ -227,7 +228,7 @@ def coarseGrainingFieldsAtPosition(
         fields: tuple of arrays containing the computed coarse graining fields.
     """
     # Apply a rough filter to approximate |x| > 3*smoothingLength cutoff for particles
-    p, v, u, m = filterParticles(
+    p, v, u, m, isValid = filterParticles(
         x,
         p,
         v,
@@ -245,7 +246,7 @@ def coarseGrainingFieldsAtPosition(
     momentumDensity = jnp.dot(M, v)  # jnp.einsum("i,ij->j", M, v)
 
     velocity = jnp.divide(momentumDensity, massDensity)
-    granularTemperature = computeGranularTemperature(v, velocity, kernel)
+    granularTemperature = computeGranularTemperature(v, velocity, jnp.multiply(isValid, kernel))
 
     # stress tensor
     stressTensor = jnp.add(
