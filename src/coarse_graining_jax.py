@@ -160,21 +160,21 @@ def computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, c
 
 
 @jax.jit  # genericVectorField is either displacement or velocity
-def computeDeformationGradient(M, x, p, massDensity, genericVectorField, gaussianScale):
+def computeDeformationGradient(M, x, p, massDensity, genericVectorField, gaussianKernelFactor):
     """
     Computes the deformation gradient according to eq. 12 in "Stress and strain in pseudo-particle solids.pdf".
-    CALL_SEQUENCE: F = computeDeformationGradient(M, x, p, massDensity, genericVectorField, gaussianScale)
+    CALL_SEQUENCE: F = computeDeformationGradient(M, x, p, massDensity, genericVectorField, gaussianKernelFactor)
     INPUTS:
         M: array containing particle mass * phi(x,p), size (np,).
         x: a gridpoint coordinate (x,y,z), size (3,).
         p: array of particle positions, size np x 3.
         massDensity: mass density field at gridpoint x, scalar.
         genericVectorField: array of a generic particle vector field, size np x 3.
-        gaussianScale: Pre-computed scaling constant for the gaussian kernel.
+        gaussianKernelFactor: Pre-computed scaling constant in the gaussian kernel exponential.
     OUTPUTS:
         F: The deformation gradient tensor, size 3 x 3.
     """
-    d = jnp.multiply(2.0 * gaussianScale, x - p)  # (np, 3)
+    d = jnp.multiply(2.0 * gaussianKernelFactor, x - p)  # (np, 3)
     return jnp.divide(
         jnp.subtract(
             jnp.einsum("i,j,ik,il->kl", M, M, genericVectorField, d),
@@ -271,11 +271,11 @@ def coarseGrainingFieldsAtPosition(
     displacement = jnp.divide(jnp.dot(M, u), massDensity)
 
     # Rate of strain tensor is a double contraction over particles
-    deform_grad = computeDeformationGradient(M, x, p, massDensity, v, gaussianScale)
+    deform_grad = computeDeformationGradient(M, x, p, massDensity, v, gaussianKernelFactor)
     rateOfStrainTensor = jnp.multiply(0.5, jnp.add(deform_grad, deform_grad.T))
 
     # Strain tensor
-    deform_grad = computeDeformationGradient(M, x, p, massDensity, u, gaussianScale)
+    deform_grad = computeDeformationGradient(M, x, p, massDensity, u, gaussianKernelFactor)
     strainTensor = jnp.multiply(0.5, jnp.add(deform_grad, deform_grad.T))
 
     return (
