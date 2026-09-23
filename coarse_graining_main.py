@@ -45,7 +45,7 @@ class CoarseGrainingMain:
     }
     PARTICLE_PACKING_DENSITY = 0.75
     STANDARD_PARTICLE_BUFFER_SIZE = 1024
-    STANDARD_GRIDPOINTS_BUFFER_SIZE = 128
+    STANDARD_GRIDPOINTS_BUFFER_SIZE = 256
 
     def __init__(
         self,
@@ -67,12 +67,12 @@ class CoarseGrainingMain:
             particle_diameter: the mean particle diameter for the granular particles.
         """
 
-        self.gridpoints = np.zeros([10,3])  # Just set something, it is immidiately updated with correct input.
-        self.number_of_gridpoints = self.gridpoints.shape[0]
-        self.update_gridpoints(gridpoints)
-
         self.cg_batch_size = cg_batch_size
         self.debug_prints_on = debug_prints_on
+
+        self.gridpoints = np.zeros([10, 3])  # Just set something, it is immidiately updated with correct input.
+        self.number_of_gridpoints = self.gridpoints.shape[0]
+        self.update_gridpoints(gridpoints)
 
         # Parameters
         self.params = {
@@ -113,23 +113,17 @@ class CoarseGrainingMain:
         input_buffers = self._domainCutoff(input_buffers)
         args = {**input_buffers, **self.params}
 
-        if self.debug_prints_on:
-            print("\nInput buffer sizes")
-            print(f"gridPoints: {self.gridpoints.shape}")
-            for k, v in input_buffers.items():
-                print(f"{k}: {v.shape}")
-
         fields = coarseGrainingFields(
             jnp.asarray(self.gridpoints),
             args,
             batch_size=self.cg_batch_size,
         )
-        fields = {k: v[:self.number_of_gridpoints] for k, v in fields.items()}
+        fields = {k: v[: self.number_of_gridpoints] for k, v in fields.items()}
         return fields
 
     def update_gridpoints(self, gridpoints):
         """
-        This function is used to update the gridpoints. 
+        This function is used to update the gridpoints.
 
         INPUTS:
             gridpoints: New gridpoints stored in an nx3 array.
@@ -138,12 +132,17 @@ class CoarseGrainingMain:
         assert gridpoints.ndim == 2 and gridpoints.shape[1] == 3
         self.number_of_gridpoints = gridpoints.shape[0]
 
-        size = int(ceil(self.number_of_gridpoints / self.STANDARD_GRIDPOINTS_BUFFER_SIZE)*self.STANDARD_GRIDPOINTS_BUFFER_SIZE)
+        size = int(
+            ceil(self.number_of_gridpoints / self.STANDARD_GRIDPOINTS_BUFFER_SIZE)
+            * self.STANDARD_GRIDPOINTS_BUFFER_SIZE
+        )
         if not size == self.gridpoints.shape[0]:
             # To pad with something likely outside particle domain
             self.gridpoints = self._buffer_pad(np.asarray(gridpoints), size, pad_value=9999999.0)
+            if self.debug_prints_on:
+                print(f"Gridpoints buffer size changed to {size}")
         else:
-            self.gridpoints[:self.number_of_gridpoints] = np.asarray(gridpoints) 
+            self.gridpoints[: self.number_of_gridpoints] = np.asarray(gridpoints)
 
     def set_particle_diameter(self, particle_diameter):
         self.params["particleDiameter"] = particle_diameter
@@ -164,8 +163,8 @@ class CoarseGrainingMain:
             return np.flatnonzero(np.all((pos >= mins) & (pos <= maxs), axis=1))
 
         smoothing_length = self.params["smoothingLength"]
-        mins = self.gridpoints[:self.number_of_gridpoints].min(axis=0) - 3.0 * smoothing_length
-        maxs = self.gridpoints[:self.number_of_gridpoints].max(axis=0) + 3.0 * smoothing_length
+        mins = self.gridpoints[: self.number_of_gridpoints].min(axis=0) - 3.0 * smoothing_length
+        maxs = self.gridpoints[: self.number_of_gridpoints].max(axis=0) + 3.0 * smoothing_length
         particleIndices = pick_indices(input_buffers[P_POS_KEY], mins, maxs)
         contactIndices = pick_indices(input_buffers[C_POS_KEY], mins, maxs)
         n_particles, n_contacts = self._set_particle_buffer_sizes(particleIndices.size, contactIndices.size)
