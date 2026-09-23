@@ -188,45 +188,40 @@ def computeDeformationGradient(M, x, p, massDensity, genericVectorField, gaussia
 @jax.jit
 def coarseGrainingFieldsAtPosition(
     x: jnp.ndarray,
-    p: jnp.ndarray,
-    v: jnp.ndarray,
-    u: jnp.ndarray,
-    m: jnp.ndarray,
-    cf: jnp.ndarray,
-    cp: jnp.ndarray,
-    cn: jnp.ndarray,
-    ctu: jnp.ndarray,
-    ctv: jnp.ndarray,
-    gaussianKernelFactor,
-    gaussianScale,
-    heavisideScale,
-    smoothingLength,
-    particleDiameter,
+    particle_data: dict,
+    contact_data: dict,
+    precomputed_params: dict,
 ):
     """
     Computes the coarse graining fields at a single gridpoint x. For general documentation,
     consult "Stress and strain in pseudo-particle solids.pdf".
-    CALL SEQUENCE: fields = coarseGrainingFieldsAtPosition(x, p, v, u, m, cf, cp, cn, ctu, ctv,
-        gaussianKernelFactor, gaussianScale, heavisideScale, smoothingLength, particleDiameter)
+    CALL SEQUENCE: fields = coarseGrainingFieldsAtPosition(x, particle_data, contact_data, precomputed_params)
     INPUTS:
         x: a gridpoint coordinate (x,y,z), size (3,).
-        p: array of particle positions, size np x 3.
-        v: array of particle velocities, size np x 3.
-        u: array of particle displacements, size np x 3.
-        m: particle masses, size np.
-        cf: array of contact forces in a local frame, size nc x 3.
-        cp: array of contact positions, size nc x 3.
-        cn: array of contact normal vectors, size nc x 3.
-        ctu: array of contact tangent vectors, size nc x 3.
-        ctv: array of contact tangent vectors, size nc x 3.
-        gaussianKernelFactor: Pre-computed factor in the gaussian kernel exponential.
-        gaussianScale: Pre computed normalization constant.
-        heavisideScale: Pre computed normalization constant for heaviside kernel.
-        smoothingLength: The smoothing length parameter.
-        particleDiameter: The mean particle diameter.
+        particle_data: dict with particle data buffers.
+        contact_data: dict with contact data buffers.
+        precomputed_params: dict with precomputed parameters.
     OUTPUTS:
         fields: tuple of arrays containing the computed coarse graining fields.
     """
+
+    p = particle_data[P_POS_KEY]
+    v = particle_data[P_VEL_KEY]
+    u = particle_data[P_DISP_KEY]
+    m = particle_data[P_MASS_KEY]
+
+    cf = contact_data[C_FORCE_KEY]
+    cp = contact_data[C_POS_KEY]
+    cn = contact_data[C_NORMAL_KEY]
+    ctu = contact_data[C_TANGENT_U_KEY]
+    ctv = contact_data[C_TANGENT_V_KEY]
+
+    gaussianKernelFactor = precomputed_params["gaussianKernelFactor"]
+    gaussianScale = precomputed_params["gaussianScale"]
+    heavisideScale = precomputed_params["heavisideScale"]
+    smoothingLength = precomputed_params["smoothingLength"]
+    particleDiameter = precomputed_params["particleDiameter"]
+
     # Apply a rough filter to approximate |x| > 3*smoothingLength cutoff for particles
     p, v, u, m, isValid = filterParticles(
         x,
@@ -299,7 +294,7 @@ def coarse_graining_body(carry, x):
     """
     Body function for jax.lax.scan function. See official documentation for jax.lax.scan.
     INPUTS:
-        carry: Expects a dictionary containing all particle data and pre-computed constants. Some of the
+        carry: Expects a tuple of dictionaries (particle_data, contact_data, precomputed_params) containing all particle data and pre-computed constants. Some of the
             keys are defined in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
         x: array of gridpoints, size ng x 3.
     OUTPUTS:
@@ -307,62 +302,15 @@ def coarse_graining_body(carry, x):
         fields: a dictionary containing all the computed fields. Keys are defined
                 in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
-    # Parse input data.
-    p = carry[P_POS_KEY]
-    v = carry[P_VEL_KEY]
-    u = carry[P_DISP_KEY]
-    m = carry[P_MASS_KEY]
-    cf = carry[C_FORCE_KEY]
-    cp = carry[C_POS_KEY]
-    cn = carry[C_NORMAL_KEY]
-    ctu = carry[C_TANGENT_U_KEY]
-    ctv = carry[C_TANGENT_V_KEY]
-    gaussianKernelFactor = carry["gaussianKernelFactor"]
-    gaussianScale = carry["gaussianScale"]
-    heavisideScale = carry["heavisideScale"]
-    smoothingLength = carry["smoothingLength"]
-    particleDiameter = carry["particleDiameter"]
 
     # Create a vectorized map over the input for the gridpoints x.
     cg_vmap = jax.vmap(
         coarseGrainingFieldsAtPosition,
-        in_axes=(
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
+        in_axes=(0, None, None, None),
     )
 
     # Call coarse graining calculation to get all fields at x.
-    fields = cg_vmap(
-        x,
-        p,
-        v,
-        u,
-        m,
-        cf,
-        cp,
-        cn,
-        ctu,
-        ctv,
-        gaussianKernelFactor,
-        gaussianScale,
-        heavisideScale,
-        smoothingLength,
-        particleDiameter,
-    )
+    fields = cg_vmap(x, *carry)
 
     return carry, {
         F_MASS_DENSITY_KEY: fields[0],
@@ -406,8 +354,21 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         "gaussianKernelFactor": -0.5 / (R * R),
         "heavisideScale": 1.0 / ((2.0 * R) ** 3),
     }
-    args = {**args, **constants}
-    args[P_MASS_KEY] = args[P_MASS_KEY].flatten()
+
+    # To prepare the input for the coarse graining calculation
+    particle_data = {
+        P_POS_KEY: args[P_POS_KEY],
+        P_VEL_KEY: args[P_VEL_KEY],
+        P_DISP_KEY: args[P_DISP_KEY],
+        P_MASS_KEY: args[P_MASS_KEY].flatten(),
+    }
+    contact_data = {key: args[key] for key in (C_FORCE_KEY, C_POS_KEY, C_NORMAL_KEY, C_TANGENT_U_KEY, C_TANGENT_V_KEY)}
+    precomputed_params = {
+        **constants,
+        "smoothingLength": args["smoothingLength"],
+        "particleDiameter": args["particleDiameter"],
+    }
+    carry = (particle_data, contact_data, precomputed_params)
 
     # Batches over gridpoints using jax.lax.scan
     x_size = gridPoints.shape[0]
@@ -417,7 +378,7 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         # No splitting, just pass the whole array but add one axis for compatability.
         _, result_dict = jax.lax.scan(
             coarse_graining_body,
-            args,
+            carry,
             gridPoints[None, :, :],
         )
         result_dict_rem = {k: jnp.array([]) for k in result_dict.keys()}
@@ -425,14 +386,14 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         # First part, gridPoints is reshaped to (num_splits, batch_size, 3)
         _, result_dict = jax.lax.scan(
             coarse_graining_body,
-            args,
+            carry,
             gridPoints[: (num_splits) * batch_size].reshape(num_splits, batch_size, 3),
         )
         # Remaining part, add one axis for compatability.
         if rem_size > 0:
             _, result_dict_rem = jax.lax.scan(
                 coarse_graining_body,
-                args,
+                carry,
                 gridPoints[None, (num_splits) * batch_size :],
             )
         else:
