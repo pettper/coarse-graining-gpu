@@ -330,6 +330,35 @@ def coarse_graining_body(carry, x):
     }
 
 
+@jax.jit
+def coarse_graining_batched(points_b, pidx_b, cidx_b, particle_data, contact_data, precomputed_params):
+    """
+    Runs coarse_graining_body over batches of gridpoints with jax.lax.scan, gathering the
+    neighbour data of each batch on the device.
+    INPUTS:
+        points_b: gridpoints, size (num_batches, batch_size, 3).
+        pidx_b: particle neighbour indices, size (num_batches, batch_size, kp).
+        cidx_b: contact neighbour indices, size (num_batches, batch_size, kc).
+        particle_data, contact_data: dicts with the full (unbatched) buffers.
+        precomputed_params: dict with precomputed parameters.
+    OUTPUTS:
+        fields: dict of fields, each of size (num_batches, batch_size, ...).
+    """
+
+    def scan_body(carry, batch):
+        x, bp, bc = batch
+        batch_carry = (
+            {key: buf[bp] for key, buf in particle_data.items()},
+            {key: buf[bc] for key, buf in contact_data.items()},
+            precomputed_params,
+        )
+        _, fields = coarse_graining_body(batch_carry, x)
+        return carry, fields
+
+    _, fields = jax.lax.scan(scan_body, None, (points_b, pidx_b, cidx_b))
+    return fields
+
+
 def coarseGrainingFields(gridPoints, args, batch_size=1000):
     """
     Computes the coarse graining fields at all gridpoints. For general documentation,
@@ -387,97 +416,54 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         "smoothingLength": args["smoothingLength"],
         "particleDiameter": args["particleDiameter"],
     }
-    carry = (particle_data, contact_data, precomputed_params)
 
     particle_tree = KDTree(args[P_POS_KEY])
     contact_tree = KDTree(args[C_POS_KEY])
     _, pidx = particle_tree.query(gridPoints, k=num_cutoff_particles, p=2, workers=-1)
     _, cidx = contact_tree.query(gridPoints, k=num_cutoff_contacts, p=jnp.inf, workers=-1)
 
-    def gather_input_buffers(start_idx, end_idx):
-        particle_data = {
-            P_POS_KEY: args[P_POS_KEY][pidx[start_idx:end_idx, :]],
-            P_VEL_KEY: args[P_VEL_KEY][pidx[start_idx:end_idx, :]],
-            P_DISP_KEY: args[P_DISP_KEY][pidx[start_idx:end_idx, :]],
-            P_MASS_KEY: args[P_MASS_KEY][pidx[start_idx:end_idx, :]].squeeze(-1),
-        }
-        contact_data = {
-            key: args[key][cidx[start_idx:end_idx], :]
-            for key in (C_FORCE_KEY, C_POS_KEY, C_NORMAL_KEY, C_TANGENT_U_KEY, C_TANGENT_V_KEY)
-        }
-        return particle_data, contact_data
+    gridPoints = jnp.asarray(gridPoints)
+    pidx = jnp.asarray(pidx, dtype=jnp.int32)
+    cidx = jnp.asarray(cidx, dtype=jnp.int32)
 
+    def run_batches(start_idx, end_idx, nb):
+        """Scans over nb equally sized batches of the gridpoints start_idx:end_idx."""
+        return coarse_graining_batched(
+            gridPoints[start_idx:end_idx].reshape(nb, -1, 3),
+            pidx[start_idx:end_idx].reshape(nb, -1, pidx.shape[1]),
+            cidx[start_idx:end_idx].reshape(nb, -1, cidx.shape[1]),
+            particle_data,
+            contact_data,
+            precomputed_params,
+        )
+
+    # To perform a batched scan of coarse graining calculations over gridpoints.
     ng = gridPoints.shape[0]
-    nbatches = ng // batch_size
-    has_remainder = ng % batch_size > 0
-    result_list = []
-    for j in range(nbatches):
-        start_idx = j * batch_size
-        end_idx = start_idx + batch_size
-        particle_data, contact_data = gather_input_buffers(start_idx, end_idx)
-        carry = (particle_data, contact_data, precomputed_params)
-        _, result = coarse_graining_body(carry, gridPoints[start_idx:end_idx, :])
-        result_list.append(result)
+    nb = ng // batch_size
+    ng_batched = nb * batch_size
+    if nb > 0:
+        result_dict = run_batches(0, ng_batched, nb)
+    else:
+        result_dict = run_batches(0, ng, 1)
+    if ng_batched < ng:  # To handle remainder batch
+        result_dict_rem = run_batches(ng_batched, ng, 1)
+    else:
+        result_dict_rem = {k: jnp.array([]) for k in result_dict}
 
-    if has_remainder:
-        start_idx = nbatches * batch_size
-        end_idx = ng
-        particle_data, contact_data = gather_input_buffers(start_idx, end_idx)
-        carry = (particle_data, contact_data, precomputed_params)
-        _, result = coarse_graining_body(carry, gridPoints[start_idx:end_idx, :])
-        result_list.append(result)
-
-    cg_result = {key: jnp.concatenate([result[key] for result in result_list], axis=0) for key in result_list[0].keys()}
-    for k in cg_result.keys():
-        if k in [F_MASS_DENSITY_KEY, F_GRANULAR_TEMP_KEY, F_PRESSURE_KEY, F_VON_MISES_KEY]:
-            cg_result[k] = cg_result[k].reshape(-1)
-        elif k in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
-            cg_result[k] = cg_result[k].reshape(-1, 3)
-        elif k in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
-            cg_result[k] = cg_result[k].reshape(-1, 3, 3)
-
-    # # To run a batched scan of coarse graining calculations over gridpoints
-    # def cg_scan_batches(batched_points):
-    #     """
-    #     INPUTS:
-    #         batched_points: array of gridpoint coordinates (x, y, z), size (num_batches, batch_size, 3).
-    #     OUTPUTS:
-    #         results: a dictionary containing all the computed coarse graining fields.
-    #     """
-    #     _, results = jax.lax.scan(coarse_graining_body, carry, batched_points)
-    #     return results
-
-    # ng = gridPoints.shape[0]
-    # ng_batched = (ng // batch_size) * batch_size  # points covered by full batches
-    # if ng < batch_size:
-    #     result_dict = cg_scan_batches(gridPoints[None])  # No splitting required
-    #     has_remainder = False
-    # else:
-    #     result_dict = cg_scan_batches(gridPoints[:ng_batched].reshape(-1, batch_size, 3))
-    #     has_remainder = ng_batched < ng
-
-    # # To run the remainder batch if any
-    # if has_remainder:
-    #     result_dict_rem = cg_scan_batches(gridPoints[None, ng_batched:])
-    # else:
-    #     result_dict_rem = {k: jnp.array([]) for k in result_dict}
-
-    # cg_result = {}
-    # for key, arr in result_dict.items():
-    #     arr_rem = result_dict_rem[key]
-    #     arr_rem.block_until_ready()
-    #     arr.block_until_ready()
-    #     if key in [
-    #         F_MASS_DENSITY_KEY,
-    #         F_GRANULAR_TEMP_KEY,
-    #         F_PRESSURE_KEY,
-    #         F_VON_MISES_KEY,
-    #     ]:
-    #         cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1)
-    #     elif key in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
-    #         cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3)
-    #     elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
-    #         cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
+    cg_result = {}
+    for key, arr in result_dict.items():
+        arr_rem = result_dict_rem[key]
+        if key in [
+            F_MASS_DENSITY_KEY,
+            F_GRANULAR_TEMP_KEY,
+            F_PRESSURE_KEY,
+            F_VON_MISES_KEY,
+        ]:
+            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1)
+        elif key in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
+            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3)
+        elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
+            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
 
     return cg_result
 
