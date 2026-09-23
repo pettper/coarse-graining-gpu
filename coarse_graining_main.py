@@ -133,8 +133,7 @@ class CoarseGrainingMain:
             * self.STANDARD_GRIDPOINTS_BUFFER_SIZE
         )
         if not size == self.gridpoints.shape[0]:
-            # To pad with something likely outside particle domain
-            self.gridpoints = self._buffer_pad(np.asarray(gridpoints), size, pad_value=9999999.0)
+            self.gridpoints = self._buffer_pad(np.asarray(gridpoints), size, pad_value=0.0)
             if self.debug_prints_on:
                 print(f"Gridpoints buffer size changed to {size}")
         else:

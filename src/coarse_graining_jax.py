@@ -445,10 +445,11 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         result_dict = run_batches(0, ng_batched, nb)
     else:
         result_dict = run_batches(0, ng, 1)
-    if ng_batched < ng:  # To handle remainder batch
-        result_dict_rem = run_batches(ng_batched, ng, 1)
-    else:
+
+    if nb == 0 or ng_batched == ng:
         result_dict_rem = {k: jnp.array([]) for k in result_dict}
+    else:  # To handle remainder batch
+        result_dict_rem = run_batches(ng_batched, ng, 1)
 
     cg_result = {}
     for key, arr in result_dict.items():
