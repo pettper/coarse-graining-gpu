@@ -12,6 +12,7 @@ from math import ceil
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.spatial import KDTree
 
 from coarse_graining_gpu import (
     C_FORCE_KEY,
@@ -43,7 +44,6 @@ class CoarseGrainingMain:
         C_TANGENT_V_KEY,
         C_POS_KEY,
     }
-    PARTICLE_PACKING_DENSITY = 0.75
     STANDARD_PARTICLE_BUFFER_SIZE = 1024
     STANDARD_GRIDPOINTS_BUFFER_SIZE = 256
 
@@ -80,10 +80,6 @@ class CoarseGrainingMain:
             "smoothingLength": smoothing_length,
         }
 
-        # Determine the number of particles to include when approximating the cutoff |x| > 3*R. Passed as an environment variable to the function 'coarseGrainingAtPosition' for performance reasons.
-        os.environ["NUM_CUTOFF_PARTICLES"] = str(
-            ceil(self.PARTICLE_PACKING_DENSITY * ((3 * smoothing_length) ** 3) / ((0.5 * particle_diameter) ** 3))
-        )
         if self.debug_prints_on:
             print(f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}")
 
@@ -114,7 +110,7 @@ class CoarseGrainingMain:
         args = {**input_buffers, **self.params}
 
         fields = coarseGrainingFields(
-            jnp.asarray(self.gridpoints),
+            self.gridpoints,
             args,
             batch_size=self.cg_batch_size,
         )
@@ -171,7 +167,7 @@ class CoarseGrainingMain:
 
         for key, buffer in input_buffers.items():
             if key in [P_POS_KEY, P_VEL_KEY, P_DISP_KEY, P_MASS_KEY]:
-                input_buffers[key] = jnp.asarray(self._buffer_pad(buffer[particleIndices], n_particles, pad_value=0.0))
+                input_buffers[key] = self._buffer_pad(buffer[particleIndices], n_particles, pad_value=0.0)
             elif key in [
                 C_FORCE_KEY,
                 C_POS_KEY,
@@ -179,7 +175,7 @@ class CoarseGrainingMain:
                 C_TANGENT_U_KEY,
                 C_TANGENT_V_KEY,
             ]:
-                input_buffers[key] = jnp.asarray(self._buffer_pad(buffer[contactIndices], n_contacts, pad_value=0.0))
+                input_buffers[key] = self._buffer_pad(buffer[contactIndices], n_contacts, pad_value=0.0)
         return input_buffers
 
     def _validate_input_buffers(self, input_buffers):

@@ -8,11 +8,12 @@
 
 import os
 from functools import partial
-from math import pi, sqrt
+from math import pi, sqrt, ceil
 from time import perf_counter
 
 import jax
 import jax.numpy as jnp
+from scipy.spatial import KDTree
 
 from coarse_graining_gpu import (
     C_FORCE_KEY,
@@ -35,6 +36,8 @@ from coarse_graining_gpu import (
     P_POS_KEY,
     P_VEL_KEY,
 )
+
+PARTICLE_PACKING_DENSITY = 0.75
 
 
 @partial(jax.jit, static_argnames=["N"])
@@ -223,15 +226,15 @@ def coarseGrainingFieldsAtPosition(
     particleDiameter = precomputed_params["particleDiameter"]
 
     # Apply a rough filter to approximate |x| > 3*smoothingLength cutoff for particles
-    p, v, u, m, isValid = filterParticles(
-        x,
-        p,
-        v,
-        u,
-        m,
-        smoothingLength,
-        int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")),
-    )
+    # p, v, u, m, isValid = filterParticles(
+    #     x,
+    #     p,
+    #     v,
+    #     u,
+    #     m,
+    #     smoothingLength,
+    #     int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")),
+    # )
 
     kernel = computeGaussianKernel(gaussianKernelFactor, gaussianScale, x, p)  # (np,)
 
@@ -239,9 +242,8 @@ def coarseGrainingFieldsAtPosition(
     M = jnp.multiply(m, kernel)  # (np,)
     massDensity = jnp.sum(M)  # jnp.einsum("i->", M)
     momentumDensity = jnp.dot(M, v)  # jnp.einsum("i,ij->j", M, v)
-
     velocity = jnp.divide(momentumDensity, massDensity)
-    granularTemperature = computeGranularTemperature(v, velocity, jnp.multiply(isValid, kernel))
+    granularTemperature = computeGranularTemperature(v, velocity, kernel)
 
     # stress tensor
     stressTensor = jnp.add(
@@ -303,14 +305,16 @@ def coarse_graining_body(carry, x):
                 in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
 
+    particle_data, contact_data, precomputed_params = carry
+
     # Create a vectorized map over the input for the gridpoints x.
     cg_vmap = jax.vmap(
         coarseGrainingFieldsAtPosition,
-        in_axes=(0, None, None, None),
+        in_axes=(0, 0, 0, None),
     )
 
     # Call coarse graining calculation to get all fields at x.
-    fields = cg_vmap(x, *carry)
+    fields = cg_vmap(x, particle_data, contact_data, precomputed_params)
 
     return carry, {
         F_MASS_DENSITY_KEY: fields[0],
@@ -343,9 +347,24 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
 
-    assert not int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")) < (
+    # To determine the number of particles to include when approximating the cutoff |x| > 3*R (2-norm). rho * (large sphere / small sphere) -> rho * (3R)^3 / (r^3).
+    num_cutoff_particles = ceil(
+        PARTICLE_PACKING_DENSITY * ((3 * args["smoothingLength"]) ** 3) / ((0.5 * args["particleDiameter"]) ** 3)
+    )
+
+    # To determine the number of contacts to include when approximating the cutoff |x| > R (1-norm). rho * (box_volume / small_sphere_volume) -> rho * (8R)^3 / ((4/3)*pi*r^3).
+    num_cutoff_contacts = ceil(
+        PARTICLE_PACKING_DENSITY
+        * (8 * (args["smoothingLength"] ** 3))
+        / ((4 / 3) * pi * ((0.5 * args["particleDiameter"]) ** 3))
+    )
+
+    assert num_cutoff_particles > (
         0.75 * ((3 * args["smoothingLength"]) ** 3) / ((0.5 * args["particleDiameter"]) ** 3)
-    ), f"clipped number of particles {int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}, is likely smaller than actual number included in |x| < 3*smoothingLength. Increase NUM_CUTOFF_PARTICLES or decrease the smoothingLength."
+    ), f"clipped number of particles {num_cutoff_particles}, is likely smaller than actual number included in |x| < 3*smoothingLength. Increase NUM_CUTOFF_PARTICLES or decrease the smoothingLength."
+    assert num_cutoff_contacts > (
+        0.75 * (8 * (args["smoothingLength"] ** 3)) / ((4 / 3) * pi * ((0.5 * args["particleDiameter"]) ** 3))
+    ), f"clipped number of contacts {num_cutoff_contacts}, is likely smaller than actual number included in |x| < smoothingLength. Increase NUM_CUTOFF_CONTACTS or decrease the smoothingLength."
 
     # Pre-compute some constants
     R = args["smoothingLength"]
@@ -370,51 +389,95 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
     }
     carry = (particle_data, contact_data, precomputed_params)
 
-    # Batches over gridpoints using jax.lax.scan
-    x_size = gridPoints.shape[0]
-    num_splits = x_size // batch_size
-    rem_size = x_size % batch_size
-    if num_splits <= 0:
-        # No splitting, just pass the whole array but add one axis for compatability.
-        _, result_dict = jax.lax.scan(
-            coarse_graining_body,
-            carry,
-            gridPoints[None, :, :],
-        )
-        result_dict_rem = {k: jnp.array([]) for k in result_dict.keys()}
-    else:
-        # First part, gridPoints is reshaped to (num_splits, batch_size, 3)
-        _, result_dict = jax.lax.scan(
-            coarse_graining_body,
-            carry,
-            gridPoints[: (num_splits) * batch_size].reshape(num_splits, batch_size, 3),
-        )
-        # Remaining part, add one axis for compatability.
-        if rem_size > 0:
-            _, result_dict_rem = jax.lax.scan(
-                coarse_graining_body,
-                carry,
-                gridPoints[None, (num_splits) * batch_size :],
-            )
-        else:
-            result_dict_rem = {k: jnp.array([]) for k in result_dict.keys()}
+    particle_tree = KDTree(args[P_POS_KEY])
+    contact_tree = KDTree(args[C_POS_KEY])
+    _, pidx = particle_tree.query(gridPoints, k=num_cutoff_particles, p=2, workers=-1)
+    _, cidx = contact_tree.query(gridPoints, k=num_cutoff_contacts, p=jnp.inf, workers=-1)
 
-    cg_result = {}
-    for key, arr in result_dict.items():
-        arr_rem = result_dict_rem[key]
-        arr_rem.block_until_ready()
-        arr.block_until_ready()
-        if key in [
-            F_MASS_DENSITY_KEY,
-            F_GRANULAR_TEMP_KEY,
-            F_PRESSURE_KEY,
-            F_VON_MISES_KEY,
-        ]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1)
-        elif key in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3)
-        elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
+    def gather_input_buffers(start_idx, end_idx):
+        particle_data = {
+            P_POS_KEY: args[P_POS_KEY][pidx[start_idx:end_idx, :]],
+            P_VEL_KEY: args[P_VEL_KEY][pidx[start_idx:end_idx, :]],
+            P_DISP_KEY: args[P_DISP_KEY][pidx[start_idx:end_idx, :]],
+            P_MASS_KEY: args[P_MASS_KEY][pidx[start_idx:end_idx, :]].squeeze(-1),
+        }
+        contact_data = {
+            key: args[key][cidx[start_idx:end_idx], :]
+            for key in (C_FORCE_KEY, C_POS_KEY, C_NORMAL_KEY, C_TANGENT_U_KEY, C_TANGENT_V_KEY)
+        }
+        return particle_data, contact_data
+
+    ng = gridPoints.shape[0]
+    nbatches = ng // batch_size
+    has_remainder = ng % batch_size > 0
+    result_list = []
+    for j in range(nbatches):
+        start_idx = j * batch_size
+        end_idx = start_idx + batch_size
+        particle_data, contact_data = gather_input_buffers(start_idx, end_idx)
+        carry = (particle_data, contact_data, precomputed_params)
+        _, result = coarse_graining_body(carry, gridPoints[start_idx:end_idx, :])
+        result_list.append(result)
+
+    if has_remainder:
+        start_idx = nbatches * batch_size
+        end_idx = ng
+        particle_data, contact_data = gather_input_buffers(start_idx, end_idx)
+        carry = (particle_data, contact_data, precomputed_params)
+        _, result = coarse_graining_body(carry, gridPoints[start_idx:end_idx, :])
+        result_list.append(result)
+
+    cg_result = {key: jnp.concatenate([result[key] for result in result_list], axis=0) for key in result_list[0].keys()}
+    for k in cg_result.keys():
+        if k in [F_MASS_DENSITY_KEY, F_GRANULAR_TEMP_KEY, F_PRESSURE_KEY, F_VON_MISES_KEY]:
+            cg_result[k] = cg_result[k].reshape(-1)
+        elif k in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
+            cg_result[k] = cg_result[k].reshape(-1, 3)
+        elif k in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
+            cg_result[k] = cg_result[k].reshape(-1, 3, 3)
+
+    # # To run a batched scan of coarse graining calculations over gridpoints
+    # def cg_scan_batches(batched_points):
+    #     """
+    #     INPUTS:
+    #         batched_points: array of gridpoint coordinates (x, y, z), size (num_batches, batch_size, 3).
+    #     OUTPUTS:
+    #         results: a dictionary containing all the computed coarse graining fields.
+    #     """
+    #     _, results = jax.lax.scan(coarse_graining_body, carry, batched_points)
+    #     return results
+
+    # ng = gridPoints.shape[0]
+    # ng_batched = (ng // batch_size) * batch_size  # points covered by full batches
+    # if ng < batch_size:
+    #     result_dict = cg_scan_batches(gridPoints[None])  # No splitting required
+    #     has_remainder = False
+    # else:
+    #     result_dict = cg_scan_batches(gridPoints[:ng_batched].reshape(-1, batch_size, 3))
+    #     has_remainder = ng_batched < ng
+
+    # # To run the remainder batch if any
+    # if has_remainder:
+    #     result_dict_rem = cg_scan_batches(gridPoints[None, ng_batched:])
+    # else:
+    #     result_dict_rem = {k: jnp.array([]) for k in result_dict}
+
+    # cg_result = {}
+    # for key, arr in result_dict.items():
+    #     arr_rem = result_dict_rem[key]
+    #     arr_rem.block_until_ready()
+    #     arr.block_until_ready()
+    #     if key in [
+    #         F_MASS_DENSITY_KEY,
+    #         F_GRANULAR_TEMP_KEY,
+    #         F_PRESSURE_KEY,
+    #         F_VON_MISES_KEY,
+    #     ]:
+    #         cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1)
+    #     elif key in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
+    #         cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3)
+    #     elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
+    #         cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
 
     return cg_result
 
