@@ -228,17 +228,6 @@ def coarseGrainingFieldsAtPosition(
     smoothingLength = precomputed_params["smoothingLength"]
     particleDiameter = precomputed_params["particleDiameter"]
 
-    # Apply a rough filter to approximate |x| > 3*smoothingLength cutoff for particles
-    # p, v, u, m, isValid = filterParticles(
-    #     x,
-    #     p,
-    #     v,
-    #     u,
-    #     m,
-    #     smoothingLength,
-    #     int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")),
-    # )
-
     # To mask out invalid particles and contacts, those are set to zero, and this propagates thorough all calculations.
     kernel = computeGaussianKernel(gaussianKernelFactor, gaussianScale, x, p) * validParticles  # (np,)
     cf = cf * validContacts[:, jnp.newaxis]
