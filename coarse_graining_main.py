@@ -25,7 +25,7 @@ from .src.coarse_graining_constants import (
     P_POS_KEY,
     P_VEL_KEY,
 )
-from .src.coarse_graining_jax import coarseGrainingFields
+from .src.coarse_graining_warp import coarseGrainingFields
 
 
 class CoarseGrainingMain:
