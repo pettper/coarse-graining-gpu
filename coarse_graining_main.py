@@ -108,7 +108,6 @@ class CoarseGrainingMain:
         input_buffers = self._validate_input_buffers(input_buffers)
         input_buffers = self._domainCutoff(input_buffers)
         args = {**input_buffers, **self.params}
-
         fields = coarseGrainingFields(
             self.gridpoints,
             args,

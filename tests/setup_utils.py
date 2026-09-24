@@ -52,7 +52,6 @@ def make_test_data(num_particles, num_contacts, num_gridpoints, particle_diamete
 
 
 def time_coarse_graining(cg: CoarseGrainingMain, buffers: dict, runs=5):
-
     fields = cg.calculate(buffers)  # Do not measure, just to compile.
     jax.block_until_ready(fields)
 

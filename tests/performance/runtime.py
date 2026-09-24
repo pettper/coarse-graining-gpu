@@ -26,24 +26,33 @@ def run_test(num_particles, num_contacts, num_gridpoints, batch_sizes, title_pri
         )
 
 
-num_particles = [10000, 100000, 1000000]
-num_contacts = [5 * x for x in num_particles]
-num_gridpoints = [1000] * len(num_particles)
-batch_sizes = [512] * len(num_particles)
-run_test(
-    num_particles, num_contacts, num_gridpoints, batch_sizes, title_print="TESTING DEPENDENCY ON NUMBER OF PARTICLES"
-)
+if __name__ == "__main__":
+    num_particles = [10000, 100000, 1000000]
+    num_contacts = [5 * x for x in num_particles]
+    num_gridpoints = [1000] * len(num_particles)
+    batch_sizes = [512] * len(num_particles)
+    run_test(
+        num_particles,
+        num_contacts,
+        num_gridpoints,
+        batch_sizes,
+        title_print="TESTING DEPENDENCY ON NUMBER OF PARTICLES",
+    )
 
-num_gridpoints = [100, 1000, 10000, 100000]
-num_particles = [100000] * len(num_gridpoints)
-num_contacts = [5 * x for x in num_particles]
-batch_sizes = [512] * len(num_gridpoints)
-run_test(
-    num_particles, num_contacts, num_gridpoints, batch_sizes, title_print="\nTESTING DEPENDENCY ON NUMBER OF GRIDPOINTS"
-)
+    num_gridpoints = [100, 1000, 10000, 100000]
+    num_particles = [100000] * len(num_gridpoints)
+    num_contacts = [5 * x for x in num_particles]
+    batch_sizes = [512] * len(num_gridpoints)
+    run_test(
+        num_particles,
+        num_contacts,
+        num_gridpoints,
+        batch_sizes,
+        title_print="\nTESTING DEPENDENCY ON NUMBER OF GRIDPOINTS",
+    )
 
-batch_sizes = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 100000]
-num_particles = [100000] * len(batch_sizes)
-num_contacts = [5 * x for x in num_particles]
-num_gridpoints = [100000] * len(batch_sizes)
-run_test(num_particles, num_contacts, num_gridpoints, batch_sizes, title_print="\nTESTING DEPENDENCY ON BATCH SIZE")
+    batch_sizes = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 100000]
+    num_particles = [100000] * len(batch_sizes)
+    num_contacts = [5 * x for x in num_particles]
+    num_gridpoints = [100000] * len(batch_sizes)
+    run_test(num_particles, num_contacts, num_gridpoints, batch_sizes, title_print="\nTESTING DEPENDENCY ON BATCH SIZE")
