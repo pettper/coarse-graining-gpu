@@ -164,9 +164,12 @@ class CoarseGrainingMain:
         contactIndices = pick_indices(input_buffers[C_POS_KEY], mins, maxs)
         n_particles, n_contacts = self._set_particle_buffer_sizes(particleIndices.size, contactIndices.size)
 
+        position_pad_value = maxs.max() + 100 * smoothing_length  # Important for to pad outside grid for correctness.
         for key, buffer in input_buffers.items():
             if key in [P_POS_KEY, P_VEL_KEY, P_DISP_KEY, P_MASS_KEY]:
-                input_buffers[key] = self._buffer_pad(buffer[particleIndices], n_particles, pad_value=0.0)
+                input_buffers[key] = self._buffer_pad(
+                    buffer[particleIndices], n_particles, pad_value=position_pad_value if key == P_POS_KEY else 0.0
+                )
             elif key in [
                 C_FORCE_KEY,
                 C_POS_KEY,
@@ -174,7 +177,9 @@ class CoarseGrainingMain:
                 C_TANGENT_U_KEY,
                 C_TANGENT_V_KEY,
             ]:
-                input_buffers[key] = self._buffer_pad(buffer[contactIndices], n_contacts, pad_value=0.0)
+                input_buffers[key] = self._buffer_pad(
+                    buffer[contactIndices], n_contacts, pad_value=position_pad_value if key == C_POS_KEY else 0.0
+                )
         return input_buffers
 
     def _validate_input_buffers(self, input_buffers):
