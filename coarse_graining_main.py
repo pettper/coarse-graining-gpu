@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.spatial import KDTree
 
-from coarse_graining_gpu import (
+from .src.coarse_graining_constants import (
     C_FORCE_KEY,
     C_NORMAL_KEY,
     C_POS_KEY,
@@ -24,8 +24,8 @@ from coarse_graining_gpu import (
     P_MASS_KEY,
     P_POS_KEY,
     P_VEL_KEY,
-    coarseGrainingFields,
 )
+from .src.coarse_graining_jax import coarseGrainingFields
 
 
 class CoarseGrainingMain:

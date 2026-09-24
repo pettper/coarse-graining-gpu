@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coarse-graining-gpu"
+version = "0.1.0"
+description = "A small GPU-accelerated coarse graining library"
+requires-python = ">=3.9"
+dependencies = ["jax", "numpy", "scipy"]
+
+[tool.setuptools]
+packages = ["coarse_graining_gpu", "coarse_graining_gpu.src"]
+
+[tool.setuptools.package-dir]
+coarse_graining_gpu = "."
+"coarse_graining_gpu.src" = "src"

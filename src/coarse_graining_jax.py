@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 from scipy.spatial import KDTree
 
-from coarse_graining_gpu import (
+from .coarse_graining_constants import (
     C_FORCE_KEY,
     C_NORMAL_KEY,
     C_POS_KEY,
