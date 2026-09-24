@@ -41,37 +41,6 @@ PARTICLE_PACKING_DENSITY = 0.75
 CONTACTS_PER_PARTICLE = 8
 
 
-@partial(jax.jit, static_argnames=["N"])
-def filterParticles(x, p, v, u, m, smoothingLength, N):
-    """
-    Apply a filter to keep the 'N' particles closest to x, that are within 3 * smoothingLength of x.
-    CALL SEQUENCE: pos, vel, disp, mass = filterParticles(x, p, v, u, m, smoothingLength, N)
-    INPUTS:
-        x: array of gridpoints, size ng x 3, ng = number of gridpoints.
-        p: array of particle positions, size np x 3, np = number of particles.
-        v: array of particle velocities, size np x 3.
-        u: array of particle displacements, size np x 3.
-        m: particle masses, size np.
-        smoothingLength: kernel smoothing length.
-        N: number of particles to include in the result.
-    OUTPUTS:
-        pos: filtered particle positions.
-        vel: filtered particle velocities.
-        disp: filtered particle displacements.
-        mass: filtered particle masses.
-    """
-    negDistance2, idx = jax.lax.top_k(jnp.negative(jnp.sum(jnp.square(jnp.subtract(x, p)), axis=1)), N)
-    isValid = jnp.absolute(negDistance2) < 9 * smoothingLength * smoothingLength
-    isValid = isValid.astype(jnp.uint8)
-    return (
-        jnp.multiply(isValid[:, None], p[idx, :]),
-        jnp.multiply(isValid[:, None], v[idx, :]),
-        jnp.multiply(isValid[:, None], u[idx, :]),
-        jnp.multiply(isValid, m[idx]),
-        isValid,
-    )
-
-
 @jax.jit
 def computeGaussianKernel(factor, scale, x, p):
     """
