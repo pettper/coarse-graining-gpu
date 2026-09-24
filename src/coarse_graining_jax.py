@@ -38,6 +38,7 @@ from .coarse_graining_constants import (
 )
 
 PARTICLE_PACKING_DENSITY = 0.75
+CONTACTS_PER_PARTICLE = 8
 
 
 @partial(jax.jit, static_argnames=["N"])
@@ -212,12 +213,14 @@ def coarseGrainingFieldsAtPosition(
     v = particle_data[P_VEL_KEY]
     u = particle_data[P_DISP_KEY]
     m = particle_data[P_MASS_KEY]
+    validParticles = particle_data["validParticles"]
 
     cf = contact_data[C_FORCE_KEY]
     cp = contact_data[C_POS_KEY]
     cn = contact_data[C_NORMAL_KEY]
     ctu = contact_data[C_TANGENT_U_KEY]
     ctv = contact_data[C_TANGENT_V_KEY]
+    validContacts = contact_data["validContacts"]
 
     gaussianKernelFactor = precomputed_params["gaussianKernelFactor"]
     gaussianScale = precomputed_params["gaussianScale"]
@@ -236,7 +239,9 @@ def coarseGrainingFieldsAtPosition(
     #     int(os.environ.get("NUM_CUTOFF_PARTICLES", "1500")),
     # )
 
-    kernel = computeGaussianKernel(gaussianKernelFactor, gaussianScale, x, p)  # (np,)
+    # To mask out invalid particles and contacts, those are set to zero, and this propagates thorough all calculations.
+    kernel = computeGaussianKernel(gaussianKernelFactor, gaussianScale, x, p) * validParticles  # (np,)
+    cf = cf * validContacts[:, jnp.newaxis]
 
     # Contract over particles to obtain mass density and momentum density fields
     M = jnp.multiply(m, kernel)  # (np,)
@@ -347,11 +352,13 @@ def coarse_graining_batched(points_b, pidx_b, cidx_b, particle_data, contact_dat
 
     def scan_body(carry, batch):
         x, bp, bc = batch
-        batch_carry = (
-            {key: buf[bp] for key, buf in particle_data.items()},
-            {key: buf[bc] for key, buf in contact_data.items()},
-            precomputed_params,
-        )
+        batch_particle_data = {key: buf[bp] for key, buf in particle_data.items()} | {
+            "validParticles": bp < particle_data[P_POS_KEY].shape[0]
+        }
+        batch_contact_data = {key: buf[bc] for key, buf in contact_data.items()} | {
+            "validContacts": bc < contact_data[C_POS_KEY].shape[0]
+        }
+        batch_carry = (batch_particle_data, batch_contact_data, precomputed_params)
         _, fields = coarse_graining_body(batch_carry, x)
         return carry, fields
 
@@ -382,18 +389,11 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
     )
 
     # To determine the number of contacts to include when approximating the cutoff |x| > R (1-norm). rho * (box_volume / small_sphere_volume) -> rho * (8R)^3 / ((4/3)*pi*r^3).
-    num_cutoff_contacts = ceil(
+    num_cutoff_contacts = CONTACTS_PER_PARTICLE * ceil(
         PARTICLE_PACKING_DENSITY
         * (8 * (args["smoothingLength"] ** 3))
         / ((4 / 3) * pi * ((0.5 * args["particleDiameter"]) ** 3))
     )
-
-    assert num_cutoff_particles > (
-        0.75 * ((3 * args["smoothingLength"]) ** 3) / ((0.5 * args["particleDiameter"]) ** 3)
-    ), f"clipped number of particles {num_cutoff_particles}, is likely smaller than actual number included in |x| < 3*smoothingLength. Increase NUM_CUTOFF_PARTICLES or decrease the smoothingLength."
-    assert num_cutoff_contacts > (
-        0.75 * (8 * (args["smoothingLength"] ** 3)) / ((4 / 3) * pi * ((0.5 * args["particleDiameter"]) ** 3))
-    ), f"clipped number of contacts {num_cutoff_contacts}, is likely smaller than actual number included in |x| < smoothingLength. Increase NUM_CUTOFF_CONTACTS or decrease the smoothingLength."
 
     # Pre-compute some constants
     R = args["smoothingLength"]
@@ -417,10 +417,18 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         "particleDiameter": args["particleDiameter"],
     }
 
+    start = perf_counter()
     particle_tree = KDTree(args[P_POS_KEY])
     contact_tree = KDTree(args[C_POS_KEY])
-    _, pidx = particle_tree.query(gridPoints, k=num_cutoff_particles, p=2, workers=-1)
-    _, cidx = contact_tree.query(gridPoints, k=num_cutoff_contacts, p=jnp.inf, workers=-1)
+    print("Build Trees CPU time:", perf_counter() - start)
+    start = perf_counter()
+    _, pidx = particle_tree.query(
+        gridPoints, k=num_cutoff_particles, distance_upper_bound=3 * args["smoothingLength"], p=2, workers=-1
+    )
+    _, cidx = contact_tree.query(
+        gridPoints, k=num_cutoff_contacts, distance_upper_bound=args["smoothingLength"], p=jnp.inf, workers=-1
+    )
+    print("Tree query CPU time:", perf_counter() - start)
 
     gridPoints = jnp.asarray(gridPoints)
     pidx = jnp.asarray(pidx, dtype=jnp.int32)
