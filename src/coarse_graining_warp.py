@@ -3,18 +3,10 @@
 # Description: This file contains a GPU-accelerated implementation of the coarse graining method described in
 #              the document "./coarse_graining_documentation/Stress and strain in pseudo-particle solids.pdf".
 #              The implementation uses the python library NVIDIA Warp. It is a drop-in alternative to
-#              coarseGrainingFields in "coarse_graining_jax.py": same inputs, same output keys, JAX arrays out.
-#
-#              One thread per gridpoint walks its actual neighbours through on-device hash grids, so there is
-#              no fixed neighbour count k, no padding and no CPU KDTree. The particle sums are done in two passes:
-#              pass 1 gives mass density, momentum, displacement and kinetic stress; pass 2 uses the resulting
-#              mean velocity/displacement for the granular temperature and the deformation gradients, using
-#                  F = sum_i M_i (u_i - u_mean) (x) d_i / rho,
-#              which equals the double sum in eq. 12 but avoids cancellation in float32.
+#              coarseGrainingFields in "coarse_graining_jax.py"
 
 from math import pi, sqrt
 
-import jax
 import numpy as np
 import warp as wp
 
@@ -351,7 +343,4 @@ def coarseGrainingFields(gridpoints, args):
         F_RATE_OF_STRAIN_KEY: cg_fields.rate_of_strain_tensor,
     }
 
-    # to_jax is zero-copy on CUDA; vec3/mat33 arrays come out as (ng, 3) and (ng, 3, 3).
-    if device.is_cuda:
-        return {key: wp.to_jax(arr) for key, arr in outputs.items()}
-    return {key: jax.numpy.asarray(arr.numpy()) for key, arr in outputs.items()}
+    return {key: arr.numpy() for key, arr in outputs.items()}

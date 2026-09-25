@@ -13,6 +13,7 @@ from time import perf_counter
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from scipy.spatial import KDTree
 
 from .coarse_graining_constants import (
@@ -432,4 +433,4 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
             cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
 
-    return cg_result
+    return {key: np.asarray(arr) for key, arr in cg_result.items()}
