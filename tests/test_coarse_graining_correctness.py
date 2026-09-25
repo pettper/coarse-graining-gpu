@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 
-from coarse_graining_gpu.coarse_graining_main import CoarseGrainingMain
+from coarse_graining_gpu.coarse_graining_main import CoarseGrainingMain, GPUBackend
 from coarse_graining_gpu.src.coarse_graining_constants import (
     C_FORCE_KEY,
     C_NORMAL_KEY,
@@ -79,7 +79,9 @@ class TestCoarseGrainingCorrectness(unittest.TestCase):
     def setUpClass(cls):
 
         dtype = np.float32
-        cls.gridpoints = np.array([[0.0, 0.0, 0.0], [0.5 * PARTICLE_DIAMETER for _ in range(3)]], dtype=dtype)
+        cls.gridpoints = np.array(
+            [[0.0, 0.0, 0.0], [0.5 * PARTICLE_DIAMETER] * 3, [100 * PARTICLE_DIAMETER] * 3], dtype=dtype
+        )
         particle_positions = np.array(
             [
                 [PARTICLE_DIAMETER, 0.0, -PARTICLE_DIAMETER],
@@ -112,14 +114,17 @@ class TestCoarseGrainingCorrectness(unittest.TestCase):
             C_TANGENT_V_KEY: np.array([[0.0, 1.0, 0.0] for _ in range(num_contacts)]),
         }
         cls.buffers = {k: v.astype(dtype) for k, v in cls.buffers.items()}
-        cg = CoarseGrainingMain(
-            cls.gridpoints,
-            smoothing_length=SMOOTHING_LENGTH,
-            particle_diameter=PARTICLE_DIAMETER,
-            cg_batch_size=10,
-            debug_prints_on=False,
-        )
-        cls.cg_fields = cg.calculate(cls.buffers)
+        cls.cg_fields = {}
+        for backend in GPUBackend:
+            cg = CoarseGrainingMain(
+                cls.gridpoints,
+                smoothing_length=SMOOTHING_LENGTH,
+                particle_diameter=PARTICLE_DIAMETER,
+                cg_batch_size=10,
+                debug_prints_on=False,
+                backend=backend,
+            )
+            cls.cg_fields[backend.name] = cg.calculate(cls.buffers)
 
         # Correct fields from manual calculation
         kernel = gaussian_kernel(cls.gridpoints, cls.buffers[P_POS_KEY])
@@ -162,79 +167,40 @@ class TestCoarseGrainingCorrectness(unittest.TestCase):
         cls.correct_strain_tensor = tensors[0]
         cls.correct_rate_of_strain_tensor = tensors[1]
 
-    def test_mass_density_is_correct(self):
-        # From coarse graining
-        mass_density = self.cg_fields[F_MASS_DENSITY_KEY]
+    def assert_correct_for_all_backends(self, key, correct):
+        for backend, fields in self.cg_fields.items():
+            with self.subTest(backend=backend):
+                np.testing.assert_allclose(fields[key], correct, rtol=RTOL, atol=ATOL, strict=True)
 
-        # Compare to manual calculation
-        np.testing.assert_allclose(mass_density, self.correct_mass_density, rtol=RTOL, atol=ATOL, strict=True)
+    def test_mass_density_is_correct(self):
+        self.assert_correct_for_all_backends(F_MASS_DENSITY_KEY, self.correct_mass_density)
 
     def test_momentum_density_is_correct(self):
-        # From coarse graining
-        momentum_density = self.cg_fields[F_MOM_DENSITY_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(momentum_density, self.correct_momentum_density, rtol=RTOL, atol=ATOL, strict=True)
+        self.assert_correct_for_all_backends(F_MOM_DENSITY_KEY, self.correct_momentum_density)
 
     def test_velocity_is_correct(self):
-        # From coarse graining
-        velocity = self.cg_fields[F_VEL_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(velocity, self.correct_velocity, rtol=RTOL, atol=ATOL, strict=True)
+        self.assert_correct_for_all_backends(F_VEL_KEY, self.correct_velocity)
 
     def test_granular_temperature_is_correct(self):
-        # From coarse graining
-        granular_temperature = self.cg_fields[F_GRANULAR_TEMP_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(
-            granular_temperature, self.correct_granular_temperature, rtol=RTOL, atol=ATOL, strict=True
-        )
+        self.assert_correct_for_all_backends(F_GRANULAR_TEMP_KEY, self.correct_granular_temperature)
 
     def test_displacement_is_correct(self):
-        # From coarse graining
-        displacement = self.cg_fields[F_DISP_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(displacement, self.correct_displacement, rtol=RTOL, atol=ATOL, strict=True)
+        self.assert_correct_for_all_backends(F_DISP_KEY, self.correct_displacement)
 
     def test_stress_tensor_is_correct(self):
-        # From coarse graining
-        stress_tensor = self.cg_fields[F_STRESS_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(stress_tensor, self.correct_stress_tensor, rtol=RTOL, atol=ATOL, strict=True)
+        self.assert_correct_for_all_backends(F_STRESS_KEY, self.correct_stress_tensor)
 
     def test_pressure_is_correct(self):
-        # From coarse graining
-        pressure = self.cg_fields[F_PRESSURE_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(pressure, self.correct_pressure, rtol=RTOL, atol=ATOL, strict=True)
+        self.assert_correct_for_all_backends(F_PRESSURE_KEY, self.correct_pressure)
 
     def test_von_mises_stress_is_correct(self):
-        # From coarse graining
-        von_mises_stress = self.cg_fields[F_VON_MISES_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(von_mises_stress, self.correct_von_mises_stress, rtol=RTOL, atol=ATOL, strict=True)
+        self.assert_correct_for_all_backends(F_VON_MISES_KEY, self.correct_von_mises_stress)
 
     def test_strain_tensor_is_correct(self):
-        # From coarse graining
-        strain_tensor = self.cg_fields[F_STRAIN_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(strain_tensor, self.correct_strain_tensor, rtol=RTOL, atol=ATOL, strict=True)
+        self.assert_correct_for_all_backends(F_STRAIN_KEY, self.correct_strain_tensor)
 
     def test_rate_of_strain_tensor_is_correct(self):
-        # From coarse graining
-        rate_of_strain_tensor = self.cg_fields[F_RATE_OF_STRAIN_KEY]
-
-        # Compare to manual calculation
-        np.testing.assert_allclose(
-            rate_of_strain_tensor, self.correct_rate_of_strain_tensor, rtol=RTOL, atol=ATOL, strict=True
-        )
+        self.assert_correct_for_all_backends(F_RATE_OF_STRAIN_KEY, self.correct_rate_of_strain_tensor)
 
 
 if __name__ == "__main__":

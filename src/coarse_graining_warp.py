@@ -119,29 +119,6 @@ def coarseGrainingKernel(
             mu += M * u[i]
             kineticStress -= M * wp.outer(v[i], v[i])
 
-    vel = mom / rho
-    disp = mu / rho
-
-    # Pass 2 over particles: granular temperature and deformation gradients, relative to the mean fields.
-    temperature = float(0.0)
-    gradV = wp.mat33(0.0)
-    gradU = wp.mat33(0.0)
-    query = wp.hash_grid_query(particle_grid, x, particleCutoff)
-    i = int(0)
-    while wp.hash_grid_query_next(query, i):
-        r = x - p[i]
-        r2 = wp.dot(r, r)
-        if r2 < particleCutoff2:
-            phi = gaussianScale * wp.exp(gaussianKernelFactor * r2)
-            M = m[i] * phi
-            d = 2.0 * gaussianKernelFactor * r
-            dv = v[i] - vel
-            temperature += phi * wp.dot(dv, dv)
-            gradV += M * wp.outer(dv, d)
-            gradU += M * wp.outer(u[i] - disp, d)
-    gradV = gradV / rho
-    gradU = gradU / rho
-
     # Contacts inside the box |x - cp|_inf <= R. The hash query is spherical, so query the circumscribed sphere.
     contactSum = wp.mat33(0.0)
     query = wp.hash_grid_query(contact_grid, x, 1.7320508 * smoothingLength)
@@ -159,12 +136,47 @@ def coarseGrainingKernel(
 
     massDensity[tid] = rho
     momentumDensity[tid] = mom
-    velocity[tid] = vel
-    displacement[tid] = disp
-    granularTemperature[tid] = temperature
     pressure[tid] = press
     vonMisesStress[tid] = vonMises
     stressTensor[tid] = stress
+
+    # No particles within the cutoff: the mass weighted fields are undefined (NaN, as in the JAX implementation),
+    # and pass 2 is skipped.
+    if rho == 0.0:
+        velocity[tid] = wp.vec3(wp.nan)
+        displacement[tid] = wp.vec3(wp.nan)
+        granularTemperature[tid] = wp.nan
+        strainTensor[tid] = wp.mat33(wp.nan)
+        rateOfStrainTensor[tid] = wp.mat33(wp.nan)
+        return
+
+    vel = mom / rho
+    disp = mu / rho
+
+    # Pass 2 over particles: granular temperature and deformation gradients, relative to the mean fields.
+    # The kernel gradient is d_i = 2 * gaussianKernelFactor * (x - p_i); the constant factor is applied after the loop.
+    temperature = float(0.0)
+    gradV = wp.mat33(0.0)
+    gradU = wp.mat33(0.0)
+    query = wp.hash_grid_query(particle_grid, x, particleCutoff)
+    i = int(0)
+    while wp.hash_grid_query_next(query, i):
+        r = x - p[i]
+        r2 = wp.dot(r, r)
+        if r2 < particleCutoff2:
+            phi = gaussianScale * wp.exp(gaussianKernelFactor * r2)
+            M = m[i] * phi
+            dv = v[i] - vel
+            temperature += phi * wp.dot(dv, dv)
+            gradV += M * wp.outer(dv, r)
+            gradU += M * wp.outer(u[i] - disp, r)
+    gradScale = 2.0 * gaussianKernelFactor / rho
+    gradV = gradScale * gradV
+    gradU = gradScale * gradU
+
+    velocity[tid] = vel
+    displacement[tid] = disp
+    granularTemperature[tid] = temperature
     strainTensor[tid] = 0.5 * (gradU + wp.transpose(gradU))
     rateOfStrainTensor[tid] = 0.5 * (gradV + wp.transpose(gradV))
 

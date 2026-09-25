@@ -7,6 +7,7 @@
 # 2025-12-04: First public version, programmed by Petter Persson.
 import os
 from math import ceil
+from enum import Enum
 
 # AGX imports
 import jax
@@ -25,7 +26,13 @@ from .src.coarse_graining_constants import (
     P_POS_KEY,
     P_VEL_KEY,
 )
-from .src.coarse_graining_warp import coarseGrainingFields
+from .src.coarse_graining_warp import coarseGrainingFields as cg_fields_warp
+from .src.coarse_graining_jax import coarseGrainingFields as cg_fields_jax
+
+
+class GPUBackend(Enum):
+    WARP = 0
+    JAX = 1
 
 
 class CoarseGrainingMain:
@@ -54,19 +61,28 @@ class CoarseGrainingMain:
         particle_diameter,
         cg_batch_size=100,
         debug_prints_on=False,
+        backend=GPUBackend.WARP,
     ):
         """
         CALL SEQUENCE: cg_listener = CoarseGrainingListenerJAX(
             gridpoints,
             smoothing_length,
             particle_diameter,
+            cg_batch_size=100,
+            debug_prints_on=False,
+            backend="jax",
         )
         INPUTS:
             grid: array of size np x 3, assumed to be regular grid.
             smoothing_length: the smoothing length parameter to use.
             particle_diameter: the mean particle diameter for the granular particles.
+            cg_batch_size: the batch size to use for the coarse graining calculation on the GPU.
+            debug_prints_on: Boolean, whether to print debug information.
+            backend: String, either "jax" or "warp". The coarse graining calculation is performed on the GPU using the
+                     coarseGrainingFields function from the coarse_graining_jax or coarse_graining_warp modules.
         """
 
+        self.backend = self.set_backend(backend)
         self.cg_batch_size = cg_batch_size
         self.debug_prints_on = debug_prints_on
 
@@ -108,7 +124,7 @@ class CoarseGrainingMain:
         input_buffers = self._validate_input_buffers(input_buffers)
         input_buffers = self._domainCutoff(input_buffers)
         args = {**input_buffers, **self.params}
-        fields = coarseGrainingFields(
+        fields = self.coarseGrainingFields(
             self.gridpoints,
             args,
             batch_size=self.cg_batch_size,
@@ -143,6 +159,17 @@ class CoarseGrainingMain:
 
     def set_smoothing_length(self, smoothing_length):
         self.params["smoothingLength"] = smoothing_length
+
+    def set_backend(self, backend):
+        assert isinstance(backend, GPUBackend)
+        self.backend = backend
+        if self.backend == GPUBackend.WARP:
+            self.coarseGrainingFields = cg_fields_warp
+        elif self.backend == GPUBackend.JAX:
+            self.coarseGrainingFields = cg_fields_jax
+        else:
+            raise NotImplementedError(f"Backend {backend} not implemented.")
+        return self.backend
 
     def _domainCutoff(self, input_buffers):
         """
