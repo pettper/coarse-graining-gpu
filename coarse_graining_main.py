@@ -26,7 +26,7 @@ from .src.coarse_graining_constants import (
     P_POS_KEY,
     P_VEL_KEY,
 )
-from .src.coarse_graining_warp import coarseGrainingFields as cg_fields_warp
+from .src.coarse_graining_warp import CoarseGrainingWarp
 from .src.coarse_graining_jax import coarseGrainingFields as cg_fields_jax
 
 
@@ -82,6 +82,7 @@ class CoarseGrainingMain:
                      coarseGrainingFields function from the coarse_graining_jax or coarse_graining_warp modules.
         """
 
+        self._warp_cg = None
         self.backend = self.set_backend(backend)
         self.cg_batch_size = cg_batch_size
         self.debug_prints_on = debug_prints_on
@@ -164,7 +165,8 @@ class CoarseGrainingMain:
         assert isinstance(backend, GPUBackend)
         self.backend = backend
         if self.backend == GPUBackend.WARP:
-            self.coarseGrainingFields = lambda gp, args, batch_size: cg_fields_warp(gp, args)
+            self._warp_cg = CoarseGrainingWarp() if self._warp_cg is None else self._warp_cg
+            self.coarseGrainingFields = lambda gp, args, batch_size: self._warp_cg.coarseGrainingFields(gp, args)
         elif self.backend == GPUBackend.JAX:
             self.coarseGrainingFields = cg_fields_jax
         else:
