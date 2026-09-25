@@ -149,16 +149,19 @@ class CoarseGrainingMain:
         assert gridpoints.ndim == 2 and gridpoints.shape[1] == 3
         self.number_of_gridpoints = gridpoints.shape[0]
 
-        size = int(
-            ceil(self.number_of_gridpoints / self.STANDARD_GRIDPOINTS_BUFFER_SIZE)
-            * self.STANDARD_GRIDPOINTS_BUFFER_SIZE
-        )
-        if not size == self.gridpoints.shape[0]:
-            self.gridpoints = self._buffer_pad(np.asarray(gridpoints), size, pad_value=0.0)
-            if self.debug_prints_on:
-                print(f"Gridpoints buffer size changed to {size}")
+        if self.backend == GPUBackend.JAX:
+            size = int(
+                ceil(self.number_of_gridpoints / self.STANDARD_GRIDPOINTS_BUFFER_SIZE)
+                * self.STANDARD_GRIDPOINTS_BUFFER_SIZE
+            )
+            if not size == self.gridpoints.shape[0]:
+                self.gridpoints = self._buffer_pad(np.asarray(gridpoints), size, pad_value=0.0)
+                if self.debug_prints_on:
+                    print(f"Gridpoints buffer size changed to {size}")
+            else:
+                self.gridpoints[: self.number_of_gridpoints] = np.asarray(gridpoints)
         else:
-            self.gridpoints[: self.number_of_gridpoints] = np.asarray(gridpoints)
+            self.gridpoints = np.asarray(gridpoints)
 
     def set_particle_diameter(self, particle_diameter):
         self.params["particleDiameter"] = particle_diameter

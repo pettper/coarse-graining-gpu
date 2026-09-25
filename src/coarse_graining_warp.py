@@ -32,12 +32,6 @@ from .coarse_graining_constants import (
     P_VEL_KEY,
 )
 
-# Hash table size per axis. Points are hashed into it modulo the dimension, so it need not cover the domain;
-# collisions only add candidates that are rejected by the distance test.
-HASH_GRID_DIM = 128
-
-_hash_grids = {}  # (device, name) -> wp.HashGrid, reused between calls
-
 
 @wp.struct
 class ParticleData:
@@ -151,7 +145,9 @@ def coarseGrainingKernel(
     mom = wp.vec3(0.0, 0.0, 0.0)
     mu = wp.vec3(0.0, 0.0, 0.0)
     kineticStress = wp.mat33(0.0)
-    query = wp.hash_grid_query(particle_hash_grid_id, x, particleCutoff)
+    query = wp.hash_grid_query(
+        particle_hash_grid_id, x, particleCutoff
+    )  # Note that max_dist=particleCutoff is not a hard limit. Hence, the extra check inside the loop.
     p = int(0)
     while wp.hash_grid_query_next(query, p):
         r = x - pos[p]
@@ -236,8 +232,15 @@ class CoarseGrainingWarp:
 
     def __init__(self):
         self.device = wp.get_device(wp.get_preferred_device())
-        self.particle_hash_grid = wp.HashGrid(HASH_GRID_DIM, HASH_GRID_DIM, HASH_GRID_DIM, device=self.device)
-        self.contact_hash_grid = wp.HashGrid(HASH_GRID_DIM, HASH_GRID_DIM, HASH_GRID_DIM, device=self.device)
+        self.hash_grid_dims = {"particle": (128, 128, 128), "contact": (256, 256, 256)}
+        self.particle_hash_grid = wp.HashGrid(*self.hash_grid_dims["particle"], device=self.device)
+        self.contact_hash_grid = wp.HashGrid(*self.hash_grid_dims["contact"], device=self.device)
+
+    def set_hash_grid_dims(self, particle_dims, contact_dims):
+        self.hash_grid_dims["particle"] = particle_dims
+        self.hash_grid_dims["contact"] = contact_dims
+        self.particle_hash_grid = wp.HashGrid(*self.hash_grid_dims["particle"], device=self.device)
+        self.contact_hash_grid = wp.HashGrid(*self.hash_grid_dims["contact"], device=self.device)
 
     def coarseGrainingFields(self, gridpoints, args):
         """
@@ -296,9 +299,11 @@ class CoarseGrainingWarp:
             device=device,
         )
 
-        # Cell sizes match the query radii, so each query visits the 3x3x3 block of cells around x.
-        self.particle_hash_grid.build(particle_data.pos, precomputed_params.particle_cutoff)
-        self.contact_hash_grid.build(contact_data.pos, sqrt(3.0) * R)
+        # Cell sizes match the query radii, which is optimal for performance according to documentation.
+        particle_cell_width = precomputed_params.particle_cutoff
+        contact_cell_width = sqrt(3.0) * R
+        self.particle_hash_grid.build(particle_data.pos, particle_cell_width)
+        self.contact_hash_grid.build(contact_data.pos, contact_cell_width)
 
         ng = gridpoints.shape[0]
         cg_fields = CGFields()
