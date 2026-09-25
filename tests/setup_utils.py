@@ -19,23 +19,16 @@ from coarse_graining_gpu.src.coarse_graining_constants import (
 rng = np.random.default_rng(seed=42)
 
 
-def make_test_data(num_particles, num_contacts, num_gridpoints, particle_diameter=0.01, packing_density=0.75):
-    Vp = (4 / 3) * np.pi * (0.5 * particle_diameter) ** 3
-    L = ((num_particles * Vp) / packing_density) ** (1 / 3)
-
-    p = rng.uniform(low=-0.5 * L, high=0.5 * L, size=(num_particles, 3))
+def make_particle_and_contact_buffers(num_particles, num_contacts, side_length):
+    p = rng.uniform(low=-side_length, high=side_length, size=(num_particles, 3))
     v = rng.standard_normal(size=(num_particles, 3))
     u = rng.standard_normal(size=(num_particles, 3))
     m = np.ones(num_particles)
-    cp = rng.uniform(low=-0.5 * L, high=0.5 * L, size=(num_contacts, 3))
+    cp = rng.uniform(low=-side_length, high=side_length, size=(num_contacts, 3))
     cf = rng.standard_normal(size=(num_contacts, 3))
     cn = rng.standard_normal(size=(num_contacts, 3))
     ctu = rng.standard_normal(size=(num_contacts, 3))
     ctv = rng.standard_normal(size=(num_contacts, 3))
-
-    x = np.linspace(-0.5 * L, 0.5 * L, round(num_gridpoints ** (1 / 3)))
-    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
-    gridpoints = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
 
     buffers = {
         P_POS_KEY: p,
@@ -48,6 +41,32 @@ def make_test_data(num_particles, num_contacts, num_gridpoints, particle_diamete
         C_TANGENT_U_KEY: ctu,
         C_TANGENT_V_KEY: ctv,
     }
+    return buffers
+
+
+def make_test_data(num_particles, num_contacts, num_gridpoints, particle_diameter=0.01, packing_density=0.75):
+    Vp = (4 / 3) * np.pi * (0.5 * particle_diameter) ** 3
+    L = ((num_particles * Vp) / packing_density) ** (1 / 3)
+
+    buffers = make_particle_and_contact_buffers(num_particles, num_contacts, 0.5 * L)
+
+    x = np.linspace(-0.5 * L, 0.5 * L, round(num_gridpoints ** (1 / 3)))
+    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
+    gridpoints = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+
+    return gridpoints, buffers
+
+
+def make_test_data2(num_particles, num_contacts, num_gridpoints, particle_diameter=0.01, packing_density=0.75):
+    Vp = (4 / 3) * np.pi * (0.5 * particle_diameter) ** 3
+    L = ((num_particles * Vp) / packing_density) ** (1 / 3)
+
+    buffers = make_particle_and_contact_buffers(num_particles, num_contacts, L)
+
+    x = np.linspace(-0.5 * L, 0.5 * L, round(num_gridpoints ** (1 / 3)))
+    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
+    gridpoints = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+
     return gridpoints, buffers
 
 

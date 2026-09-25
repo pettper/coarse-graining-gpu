@@ -123,7 +123,12 @@ class CoarseGrainingMain:
                     in "coarse_graining_constants.py". In addition, the gridpoints are included.
         """
         input_buffers = self._validate_input_buffers(input_buffers)
-        input_buffers = self._domainCutoff(input_buffers)
+        if self.backend == GPUBackend.JAX:
+            # This required for the JAX-implementation to logically work correctly.
+            input_buffers = self._domainCutoff(input_buffers)
+        else:
+            pass  # Warp does not care about sizes, and code runs faster in tests if we just send our input data.
+
         args = {**input_buffers, **self.params}
         fields = self.coarseGrainingFields(
             self.gridpoints,
