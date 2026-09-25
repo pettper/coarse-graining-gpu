@@ -1,5 +1,18 @@
+import argparse
+
 from coarse_graining_gpu.tests.setup_utils import make_test_data, time_coarse_graining
-from coarse_graining_gpu.coarse_graining_main import CoarseGrainingMain
+from coarse_graining_gpu.coarse_graining_main import CoarseGrainingMain, GPUBackend
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--backend", type=str, required=False, default="warp")
+args = parser.parse_args()
+
+if args.backend == "warp":
+    backend = GPUBackend.WARP
+elif args.backend == "jax":
+    backend = GPUBackend.JAX
+else:
+    raise NotImplementedError(f"Backend {args.backend} not implemented.")
 
 PARTICLE_DIAMETER = 0.01
 SMOOTHING_LENGTH = 1.5 * PARTICLE_DIAMETER
@@ -15,6 +28,7 @@ cg = CoarseGrainingMain(
     particle_diameter=PARTICLE_DIAMETER,
     cg_batch_size=BATCH_SIZE,
     debug_prints_on=False,
+    backend=backend,
 )
 
 t, ci = time_coarse_graining(cg, buffers, runs=5)

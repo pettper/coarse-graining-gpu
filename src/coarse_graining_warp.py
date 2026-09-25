@@ -47,8 +47,34 @@ HASH_GRID_DIM = 128
 _hash_grids = {}  # (device, name) -> wp.HashGrid, reused between calls
 
 
+@wp.struct
+class ParticleData:
+    mass: wp.array(dtype=float)
+    pos: wp.array(dtype=wp.vec3)
+    vel: wp.array(dtype=wp.vec3)
+    disp: wp.array(dtype=wp.vec3)
+
+
+@wp.struct
+class ContactData:
+    force: wp.array(dtype=wp.vec3)
+    pos: wp.array(dtype=wp.vec3)
+    normal: wp.array(dtype=wp.vec3)
+    tangent_u: wp.array(dtype=wp.vec3)
+    tangent_v: wp.array(dtype=wp.vec3)
+
+
+@wp.struct
+class PrecomputedParams:
+    gaussian_kernel_factor: float
+    gaussian_scale: float
+    heaviside_scale: float
+    smoothing_length: float
+    particle_diameter: float
+
+
 @wp.kernel
-def contactForceToGlobalFrame(
+def contact_force_to_global_frame(
     cf: wp.array(dtype=wp.vec3),
     cn: wp.array(dtype=wp.vec3),
     ctu: wp.array(dtype=wp.vec3),
@@ -56,8 +82,13 @@ def contactForceToGlobalFrame(
     cf_global: wp.array(dtype=wp.vec3),
 ):
     """
-    Rotates the local contact forces to the global frame, f = f0*n + f1*tu + f2*tv, so that the
-    main kernel only reads two vectors per contact.
+    Helper to get the global frame contact forces, f = f0*n + f1*tu + f2*tv.
+    INPUTS:
+        cf: array of local contact forces, size nc x 3.
+        cn: array of contact normals, size nc x 3.
+        ctu: array of contact tangent vectors, size nc x 3.
+        ctv: array of contact tangent vectors, size nc x 3.
+        cf_global: array to be filled with global frame contact forces, size nc x 3.
     """
     tid = wp.tid()
     f = cf[tid]
@@ -68,7 +99,7 @@ def contactForceToGlobalFrame(
 def coarseGrainingKernel(
     particle_grid: wp.uint64,
     contact_grid: wp.uint64,
-    x_grid: wp.array(dtype=wp.vec3),
+    gridpoints: wp.array(dtype=wp.vec3),
     p: wp.array(dtype=wp.vec3),
     v: wp.array(dtype=wp.vec3),
     u: wp.array(dtype=wp.vec3),
@@ -93,11 +124,11 @@ def coarseGrainingKernel(
     rateOfStrainTensor: wp.array(dtype=wp.mat33),
 ):
     """
-    Computes all coarse graining fields at gridpoint x_grid[tid]. For general documentation,
+    Computes all coarse graining fields at gridpoint gridpoints[tid]. For general documentation,
     consult "Stress and strain in pseudo-particle solids.pdf".
     """
     tid = wp.tid()
-    x = x_grid[tid]
+    x = gridpoints[tid]
 
     particleCutoff = 3.0 * smoothingLength
     particleCutoff2 = particleCutoff * particleCutoff
@@ -195,7 +226,7 @@ def _hash_grid(device, name):
     return _hash_grids[key]
 
 
-def coarseGrainingFields(gridPoints, args, batch_size=None, device=None):
+def coarseGrainingFields(gridPoints, args):
     """
     Computes the coarse graining fields at all gridpoints. For general documentation,
     consult "Stress and strain in pseudo-particle solids.pdf".
@@ -213,9 +244,7 @@ def coarseGrainingFields(gridPoints, args, batch_size=None, device=None):
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
 
-    if device is None:
-        device = wp.device_from_jax(args[P_POS_KEY].device) if isinstance(args[P_POS_KEY], jax.Array) else wp.get_preferred_device()
-    device = wp.get_device(device)
+    device = wp.get_device(wp.get_preferred_device())
 
     # Pre-compute some constants
     R = args["smoothingLength"]
@@ -236,7 +265,7 @@ def coarseGrainingFields(gridPoints, args, batch_size=None, device=None):
 
     nc = cp.shape[0]
     cf_global = wp.empty(nc, dtype=wp.vec3, device=device)
-    wp.launch(contactForceToGlobalFrame, dim=nc, inputs=[cf, cn, ctu, ctv], outputs=[cf_global], device=device)
+    wp.launch(contact_force_to_global_frame, dim=nc, inputs=[cf, cn, ctu, ctv], outputs=[cf_global], device=device)
 
     # Cell sizes match the query radii, so each query visits the 3x3x3 block of cells around x.
     particle_grid = _hash_grid(device, "particles")

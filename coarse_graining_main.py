@@ -164,7 +164,7 @@ class CoarseGrainingMain:
         assert isinstance(backend, GPUBackend)
         self.backend = backend
         if self.backend == GPUBackend.WARP:
-            self.coarseGrainingFields = cg_fields_warp
+            self.coarseGrainingFields = lambda gp, args, batch_size: cg_fields_warp(gp, args)
         elif self.backend == GPUBackend.JAX:
             self.coarseGrainingFields = cg_fields_jax
         else:
