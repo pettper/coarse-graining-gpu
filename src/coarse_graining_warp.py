@@ -161,11 +161,9 @@ def coarseGrainingKernel(
             kineticStress -= M * wp.outer(vel[p], vel[p])
 
     # To calculate the contact stress from contacts inside the box |x - cp|_inf <= R.
-    # The hash query is spherical, so query the circumscribed sphere and filter out contacts outside the box.
-    # Box side is L = 2R => radius of circumscribed sphere is 0.5*sqrt(3.0)*L = sqrt(3.0)*R
-    # sqrt(3.0) = 1.7320508075688772
+    # See comment about hash grid query and cell sizes in coarseGrainingFields.
     contact_stress = wp.mat33(0.0)
-    query = wp.hash_grid_query(contact_hash_grid_id, x, float(1.7320508075688772) * R)
+    query = wp.hash_grid_query(contact_hash_grid_id, x, R)
     c = int(0)
     while wp.hash_grid_query_next(query, c):
         r = x - cpos[c]
@@ -299,9 +297,15 @@ class CoarseGrainingWarp:
             device=device,
         )
 
-        # Cell sizes match the query radii, which is optimal for performance according to documentation.
+        # According to documentation: build() creates a hash grid of cells. Each cell is of size cell_width x cell_width x cell_width.
+        # When we query the hash grid, we need to specify the maximum distance r from the query point x. This triggers a check of all points
+        # in cells overlapping within [x-r, x+r] along each axis. This means we should try to optimize such that:
+        #
+        # Contacts: contact_cell_width = R, and query with max_dist=R. This results in a overlap that is always 3x3x3 cells.
+        # Particles: particle_cell_width = particleCutoff, and query with max_dist=particleCutoff. This results in a overlap that is always 3x3x3 cells.
+
         particle_cell_width = precomputed_params.particle_cutoff
-        contact_cell_width = sqrt(3.0) * R
+        contact_cell_width = R
         self.particle_hash_grid.build(particle_data.pos, particle_cell_width)
         self.contact_hash_grid.build(contact_data.pos, contact_cell_width)
 
