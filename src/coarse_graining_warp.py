@@ -57,11 +57,9 @@ class ParticleData:
 
 @wp.struct
 class ContactData:
-    force: wp.array(dtype=wp.vec3)
+    global_force: wp.array(dtype=wp.vec3)
     pos: wp.array(dtype=wp.vec3)
     normal: wp.array(dtype=wp.vec3)
-    tangent_u: wp.array(dtype=wp.vec3)
-    tangent_v: wp.array(dtype=wp.vec3)
 
 
 @wp.struct
@@ -71,6 +69,27 @@ class PrecomputedParams:
     heaviside_scale: float
     smoothing_length: float
     particle_diameter: float
+    particle_cutoff: float
+    particle_cutoff_sq: float
+
+
+@wp.struct
+class CGFields:
+    mass_density: wp.array(dtype=float)
+    momentum_density: wp.array(dtype=wp.vec3)
+    velocity: wp.array(dtype=wp.vec3)
+    displacement: wp.array(dtype=wp.vec3)
+    granular_temperature: wp.array(dtype=float)
+    pressure: wp.array(dtype=float)
+    von_mises_stress: wp.array(dtype=float)
+    stress_tensor: wp.array(dtype=wp.mat33)
+    strain_tensor: wp.array(dtype=wp.mat33)
+    rate_of_strain_tensor: wp.array(dtype=wp.mat33)
+
+
+@wp.func
+def gaussian_kernel(r2: float, kernel_factor: float, scale: float):
+    return scale * wp.exp(kernel_factor * r2)
 
 
 @wp.kernel
@@ -97,119 +116,124 @@ def contact_force_to_global_frame(
 
 @wp.kernel
 def coarseGrainingKernel(
-    particle_grid: wp.uint64,
-    contact_grid: wp.uint64,
+    particle_hash_grid: wp.uint64,
+    contact_hash_grid: wp.uint64,
     gridpoints: wp.array(dtype=wp.vec3),
-    p: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    u: wp.array(dtype=wp.vec3),
-    m: wp.array(dtype=float),
-    cp: wp.array(dtype=wp.vec3),
-    cf_global: wp.array(dtype=wp.vec3),
-    cn: wp.array(dtype=wp.vec3),
-    gaussianKernelFactor: float,
-    gaussianScale: float,
-    heavisideScale: float,
-    smoothingLength: float,
-    particleDiameter: float,
-    massDensity: wp.array(dtype=float),
-    momentumDensity: wp.array(dtype=wp.vec3),
-    velocity: wp.array(dtype=wp.vec3),
-    displacement: wp.array(dtype=wp.vec3),
-    granularTemperature: wp.array(dtype=float),
-    pressure: wp.array(dtype=float),
-    vonMisesStress: wp.array(dtype=float),
-    stressTensor: wp.array(dtype=wp.mat33),
-    strainTensor: wp.array(dtype=wp.mat33),
-    rateOfStrainTensor: wp.array(dtype=wp.mat33),
+    particle_data: ParticleData,
+    contact_data: ContactData,
+    precomputed_params: PrecomputedParams,
+    cg_fields: CGFields,
 ):
     """
-    Computes all coarse graining fields at gridpoint gridpoints[tid]. For general documentation,
-    consult "Stress and strain in pseudo-particle solids.pdf".
+    Computes all coarse graining fields at gridpoint gridpoints[tid].
+    INPUTS:
+        particle_hash_grid: Warp hash grid for particles.
+        contact_hash_grid: Warp hash grid for contacts.
+        gridpoints: Warp array of gridpoints, size ng x 3.
+        particle_data: ParticleData struct.
+        contact_data: ContactData struct.
+        precomputed_params: PrecomputedParams struct.
+        cg_fields: CGFields struct. Outputs are written to this struct.
     """
+
     tid = wp.tid()
     x = gridpoints[tid]
 
-    particleCutoff = 3.0 * smoothingLength
-    particleCutoff2 = particleCutoff * particleCutoff
+    # To parse input data before calculations start
+    R = precomputed_params.smoothing_length
+    particleCutoff = precomputed_params.particle_cutoff
+    particleCutoff2 = precomputed_params.particle_cutoff_sq
+    gaussianScale = precomputed_params.gaussian_scale
+    gaussianKernelFactor = precomputed_params.gaussian_kernel_factor
+    pos = particle_data.pos
+    vel = particle_data.vel
+    u = particle_data.disp
+    mass = particle_data.mass
+    cpos = contact_data.pos
+    cf = contact_data.global_force
+    cn = contact_data.normal
 
-    # Pass 1 over particles: mass density, momentum, mass weighted displacement and kinetic stress.
+    # To calculate the mass density, momentum density, mass weighted displacement and kinetic stress.
+    # Requires one pass over neighbour particles
     rho = float(0.0)
     mom = wp.vec3(0.0, 0.0, 0.0)
     mu = wp.vec3(0.0, 0.0, 0.0)
     kineticStress = wp.mat33(0.0)
-    query = wp.hash_grid_query(particle_grid, x, particleCutoff)
-    i = int(0)
-    while wp.hash_grid_query_next(query, i):
-        r = x - p[i]
+    query = wp.hash_grid_query(particle_hash_grid, x, particleCutoff)
+    p = int(0)
+    while wp.hash_grid_query_next(query, p):
+        r = x - pos[p]
         r2 = wp.dot(r, r)
         if r2 < particleCutoff2:
-            M = m[i] * gaussianScale * wp.exp(gaussianKernelFactor * r2)
-            rho += M
-            mom += M * v[i]
-            mu += M * u[i]
-            kineticStress -= M * wp.outer(v[i], v[i])
+            kernel = gaussian_kernel(r2, gaussianKernelFactor, gaussianScale)
+            M = mass[p] * kernel
+            rho += mass[p] * kernel
+            mom += M * vel[p]
+            mu += M * u[p]
+            kineticStress -= M * wp.outer(vel[p], vel[p])
 
-    # Contacts inside the box |x - cp|_inf <= R. The hash query is spherical, so query the circumscribed sphere.
-    contactSum = wp.mat33(0.0)
-    query = wp.hash_grid_query(contact_grid, x, 1.7320508 * smoothingLength)
+    # To calculate the contact stress from contacts inside the box |x - cp|_inf <= R.
+    # The hash query is spherical, so query the circumscribed sphere and filter out contacts outside the box.
+    # Box side is L = 2R => radius of circumscribed sphere is 0.5*sqrt(3.0)*L = sqrt(3.0)*R
+    # sqrt(3.0) = 1.7320508075688772
+    contact_stress = wp.mat33(0.0)
+    query = wp.hash_grid_query(contact_hash_grid, x, float(1.7320508075688772) * R)
     c = int(0)
     while wp.hash_grid_query_next(query, c):
-        r = x - cp[c]
-        if wp.abs(r[0]) <= smoothingLength and wp.abs(r[1]) <= smoothingLength and wp.abs(r[2]) <= smoothingLength:
-            contactSum += wp.outer(cf_global[c], cn[c])
+        r = x - cpos[c]
+        if wp.abs(r[0]) <= R and wp.abs(r[1]) <= R and wp.abs(r[2]) <= R:
+            contact_stress += wp.outer(cf[c], cn[c])
+    contact_stress *= -precomputed_params.heaviside_scale * precomputed_params.particle_diameter
 
-    stress = kineticStress - (heavisideScale * particleDiameter) * contactSum
-    press = -wp.trace(stress) / 3.0
+    stress = kineticStress + contact_stress
+    pressure = -wp.trace(stress) / 3.0
 
-    # von mises stress = sqrt(3.0/2.0*(stress_ij * stress_ij - 3*pressure ** 2)), clamped against round-off below zero
-    vonMises = wp.sqrt(wp.max(1.5 * (wp.ddot(stress, stress) - 3.0 * press * press), 0.0))
+    # von mises stress is clamped against round-off below zero
+    vonMises = wp.sqrt(wp.max(1.5 * (wp.ddot(stress, stress) - 3.0 * pressure * pressure), 0.0))
 
-    massDensity[tid] = rho
-    momentumDensity[tid] = mom
-    pressure[tid] = press
-    vonMisesStress[tid] = vonMises
-    stressTensor[tid] = stress
+    cg_fields.mass_density[tid] = rho
+    cg_fields.momentum_density[tid] = mom
+    cg_fields.pressure[tid] = pressure
+    cg_fields.von_mises_stress[tid] = vonMises
+    cg_fields.stress_tensor[tid] = stress
 
-    # No particles within the cutoff: the mass weighted fields are undefined (NaN, as in the JAX implementation),
-    # and pass 2 is skipped.
+    # To break early if there are no particles within the cutoff, i.e mass density is zero.
     if rho == 0.0:
-        velocity[tid] = wp.vec3(wp.nan)
-        displacement[tid] = wp.vec3(wp.nan)
-        granularTemperature[tid] = wp.nan
-        strainTensor[tid] = wp.mat33(wp.nan)
-        rateOfStrainTensor[tid] = wp.mat33(wp.nan)
+        cg_fields.velocity[tid] = wp.vec3(wp.nan)
+        cg_fields.displacement[tid] = wp.vec3(wp.nan)
+        cg_fields.granular_temperature[tid] = wp.nan
+        cg_fields.strain_tensor[tid] = wp.mat33(wp.nan)
+        cg_fields.rate_of_strain_tensor[tid] = wp.mat33(wp.nan)
         return
 
-    vel = mom / rho
-    disp = mu / rho
+    velocity = mom / rho
+    displacement = mu / rho
 
-    # Pass 2 over particles: granular temperature and deformation gradients, relative to the mean fields.
-    # The kernel gradient is d_i = 2 * gaussianKernelFactor * (x - p_i); the constant factor is applied after the loop.
+    # To calculate remaining fields now that we have all required data.
     temperature = float(0.0)
     gradV = wp.mat33(0.0)
     gradU = wp.mat33(0.0)
-    query = wp.hash_grid_query(particle_grid, x, particleCutoff)
-    i = int(0)
-    while wp.hash_grid_query_next(query, i):
-        r = x - p[i]
+    query = wp.hash_grid_query(particle_hash_grid, x, particleCutoff)
+    p = int(0)
+    while wp.hash_grid_query_next(query, p):
+        r = x - pos[p]
         r2 = wp.dot(r, r)
         if r2 < particleCutoff2:
-            phi = gaussianScale * wp.exp(gaussianKernelFactor * r2)
-            M = m[i] * phi
-            dv = v[i] - vel
-            temperature += phi * wp.dot(dv, dv)
+            kernel = gaussian_kernel(r2, gaussianKernelFactor, gaussianScale)
+            M = mass[p] * kernel
+            dv = vel[p] - velocity
+            temperature += kernel * wp.dot(dv, dv)
             gradV += M * wp.outer(dv, r)
-            gradU += M * wp.outer(u[i] - disp, r)
+            gradU += M * wp.outer(u[p] - displacement, r)
     gradScale = 2.0 * gaussianKernelFactor / rho
     gradV = gradScale * gradV
     gradU = gradScale * gradU
 
-    velocity[tid] = vel
-    displacement[tid] = disp
-    granularTemperature[tid] = temperature
-    strainTensor[tid] = 0.5 * (gradU + wp.transpose(gradU))
-    rateOfStrainTensor[tid] = 0.5 * (gradV + wp.transpose(gradV))
+    cg_fields.velocity[tid] = velocity
+    cg_fields.displacement[tid] = displacement
+    cg_fields.granular_temperature[tid] = temperature
+    cg_fields.strain_tensor[tid] = 0.5 * (gradU + wp.transpose(gradU))
+    cg_fields.rate_of_strain_tensor[tid] = 0.5 * (gradV + wp.transpose(gradV))
 
 
 def _to_warp(a, dtype, device):
@@ -236,9 +260,6 @@ def coarseGrainingFields(gridPoints, args):
         args: dictionary containing all required particle buffers and the parameters, smoothing length and particle diameter.
             expected dictionary keys are defined "src/listeners/coarse_graining_calculation/coarse_graining_constants". The two parameters
             are expected to be "smoothingLength", and "particleDiameter".
-        batch_size: Ignored, kept for call compatibility with the JAX implementation. No batching is needed since
-            memory use is only the input and output buffers.
-        device: Optional Warp device, e.g. "cuda:0". Defaults to the device of a JAX input array, else Warp's preferred device.
     OUTPUTS:
         fields: a dictionary containing all the computed fields as JAX arrays (float32). Keys are defined
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
@@ -248,68 +269,87 @@ def coarseGrainingFields(gridPoints, args):
 
     # Pre-compute some constants
     R = args["smoothingLength"]
-    gaussianScale = 1.0 / ((sqrt(2.0 * pi) * R) ** 3)
-    gaussianKernelFactor = -0.5 / (R * R)
-    heavisideScale = 1.0 / ((2.0 * R) ** 3)
+    precomputed_params = PrecomputedParams()
+    precomputed_params.gaussian_kernel_factor = -0.5 / (R * R)
+    precomputed_params.gaussian_scale = 1.0 / ((sqrt(2.0 * pi) * R) ** 3)
+    precomputed_params.heaviside_scale = 1.0 / ((2.0 * R) ** 3)
+    precomputed_params.smoothing_length = R
+    precomputed_params.particle_diameter = args["particleDiameter"]
+    precomputed_params.particle_cutoff = 3.0 * R
+    precomputed_params.particle_cutoff_sq = 9.0 * R * R
 
     x = _to_warp(gridPoints, wp.vec3, device)
-    p = _to_warp(args[P_POS_KEY], wp.vec3, device)
-    v = _to_warp(args[P_VEL_KEY], wp.vec3, device)
-    u = _to_warp(args[P_DISP_KEY], wp.vec3, device)
-    m = _to_warp(args[P_MASS_KEY].reshape(-1), float, device)
-    cp = _to_warp(args[C_POS_KEY], wp.vec3, device)
-    cf = _to_warp(args[C_FORCE_KEY], wp.vec3, device)
-    cn = _to_warp(args[C_NORMAL_KEY], wp.vec3, device)
-    ctu = _to_warp(args[C_TANGENT_U_KEY], wp.vec3, device)
-    ctv = _to_warp(args[C_TANGENT_V_KEY], wp.vec3, device)
 
-    nc = cp.shape[0]
-    cf_global = wp.empty(nc, dtype=wp.vec3, device=device)
-    wp.launch(contact_force_to_global_frame, dim=nc, inputs=[cf, cn, ctu, ctv], outputs=[cf_global], device=device)
+    particle_data = ParticleData()
+    particle_data.pos = _to_warp(args[P_POS_KEY], wp.vec3, device)
+    particle_data.vel = _to_warp(args[P_VEL_KEY], wp.vec3, device)
+    particle_data.disp = _to_warp(args[P_DISP_KEY], wp.vec3, device)
+    particle_data.mass = _to_warp(args[P_MASS_KEY].reshape(-1), float, device)
+
+    contact_data = ContactData()
+    contact_data.pos = _to_warp(args[C_POS_KEY], wp.vec3, device)
+    contact_data.normal = _to_warp(args[C_NORMAL_KEY], wp.vec3, device)
+    nc = contact_data.pos.shape[0]
+    contact_data.global_force = wp.empty(nc, dtype=wp.vec3, device=device)
+    wp.launch(
+        contact_force_to_global_frame,
+        dim=nc,
+        inputs=[
+            _to_warp(args[C_FORCE_KEY], wp.vec3, device),
+            contact_data.normal,
+            _to_warp(args[C_TANGENT_U_KEY], wp.vec3, device),
+            _to_warp(args[C_TANGENT_V_KEY], wp.vec3, device),
+        ],
+        outputs=[contact_data.global_force],
+        device=device,
+    )
 
     # Cell sizes match the query radii, so each query visits the 3x3x3 block of cells around x.
-    particle_grid = _hash_grid(device, "particles")
-    particle_grid.build(p, 3.0 * R)
-    contact_grid = _hash_grid(device, "contacts")
-    contact_grid.build(cp, sqrt(3.0) * R)
+    particle_hash_grid = _hash_grid(device, "particles")
+    particle_hash_grid.build(particle_data.pos, precomputed_params.particle_cutoff)
+    contact_hash_grid = _hash_grid(device, "contacts")
+    contact_hash_grid.build(contact_data.pos, sqrt(3.0) * R)
 
     ng = x.shape[0]
-    outputs = {
-        F_MASS_DENSITY_KEY: wp.empty(ng, dtype=float, device=device),
-        F_MOM_DENSITY_KEY: wp.empty(ng, dtype=wp.vec3, device=device),
-        F_VEL_KEY: wp.empty(ng, dtype=wp.vec3, device=device),
-        F_DISP_KEY: wp.empty(ng, dtype=wp.vec3, device=device),
-        F_GRANULAR_TEMP_KEY: wp.empty(ng, dtype=float, device=device),
-        F_PRESSURE_KEY: wp.empty(ng, dtype=float, device=device),
-        F_VON_MISES_KEY: wp.empty(ng, dtype=float, device=device),
-        F_STRESS_KEY: wp.empty(ng, dtype=wp.mat33, device=device),
-        F_STRAIN_KEY: wp.empty(ng, dtype=wp.mat33, device=device),
-        F_RATE_OF_STRAIN_KEY: wp.empty(ng, dtype=wp.mat33, device=device),
-    }
+    cg_fields = CGFields()
+    cg_fields.mass_density = wp.empty(ng, dtype=float, device=device)
+    cg_fields.momentum_density = wp.empty(ng, dtype=wp.vec3, device=device)
+    cg_fields.velocity = wp.empty(ng, dtype=wp.vec3, device=device)
+    cg_fields.displacement = wp.empty(ng, dtype=wp.vec3, device=device)
+    cg_fields.granular_temperature = wp.empty(ng, dtype=float, device=device)
+    cg_fields.pressure = wp.empty(ng, dtype=float, device=device)
+    cg_fields.von_mises_stress = wp.empty(ng, dtype=float, device=device)
+    cg_fields.stress_tensor = wp.empty(ng, dtype=wp.mat33, device=device)
+    cg_fields.strain_tensor = wp.empty(ng, dtype=wp.mat33, device=device)
+    cg_fields.rate_of_strain_tensor = wp.empty(ng, dtype=wp.mat33, device=device)
 
     wp.launch(
         coarseGrainingKernel,
         dim=ng,
         inputs=[
-            particle_grid.id,
-            contact_grid.id,
+            particle_hash_grid.id,
+            contact_hash_grid.id,
             x,
-            p,
-            v,
-            u,
-            m,
-            cp,
-            cf_global,
-            cn,
-            gaussianKernelFactor,
-            gaussianScale,
-            heavisideScale,
-            R,
-            args["particleDiameter"],
+            particle_data,
+            contact_data,
+            precomputed_params,
+            cg_fields,
         ],
-        outputs=list(outputs.values()),
         device=device,
     )
+
+    outputs = {
+        F_MASS_DENSITY_KEY: cg_fields.mass_density,
+        F_MOM_DENSITY_KEY: cg_fields.momentum_density,
+        F_VEL_KEY: cg_fields.velocity,
+        F_DISP_KEY: cg_fields.displacement,
+        F_GRANULAR_TEMP_KEY: cg_fields.granular_temperature,
+        F_PRESSURE_KEY: cg_fields.pressure,
+        F_VON_MISES_KEY: cg_fields.von_mises_stress,
+        F_STRESS_KEY: cg_fields.stress_tensor,
+        F_STRAIN_KEY: cg_fields.strain_tensor,
+        F_RATE_OF_STRAIN_KEY: cg_fields.rate_of_strain_tensor,
+    }
 
     # to_jax is zero-copy on CUDA; vec3/mat33 arrays come out as (ng, 3) and (ng, 3, 3).
     if device.is_cuda:
