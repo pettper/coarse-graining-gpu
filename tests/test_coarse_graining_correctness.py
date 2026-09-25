@@ -37,7 +37,9 @@ def gaussian_kernel(x, p):
         nonlocal dtype
         scale = dtype.type((1 / (np.sqrt(2 * np.pi) * SMOOTHING_LENGTH)) ** 3)
         exp_factor = dtype.type(-0.5 / (SMOOTHING_LENGTH * SMOOTHING_LENGTH))
-        return scale * np.exp(exp_factor * (np.linalg.norm(x - p, ord=2, axis=1) ** 2))
+        norm = np.linalg.norm(x - p, ord=2, axis=1)
+        isValid = norm <= 3 * SMOOTHING_LENGTH
+        return scale * np.exp(exp_factor * (norm**2)) * isValid
 
     kernel = []
     for j in range(x.shape[0]):

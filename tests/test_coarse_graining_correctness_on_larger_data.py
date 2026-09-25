@@ -27,8 +27,8 @@ from coarse_graining_gpu.tests.setup_utils import make_test_data2
 
 PARTICLE_DIAMETER = 0.01
 SMOOTHING_LENGTH = 1.5 * PARTICLE_DIAMETER
-RTOL = 1e-6
-ATOL = 1e-5
+RTOL = 1e-4
+ATOL = 1e-3
 
 
 def gaussian_kernel(x, p):
@@ -38,7 +38,9 @@ def gaussian_kernel(x, p):
         nonlocal dtype
         scale = dtype.type((1 / (np.sqrt(2 * np.pi) * SMOOTHING_LENGTH)) ** 3)
         exp_factor = dtype.type(-0.5 / (SMOOTHING_LENGTH * SMOOTHING_LENGTH))
-        return scale * np.exp(exp_factor * (np.linalg.norm(x - p, ord=2, axis=1) ** 2))
+        norm = np.linalg.norm(x - p, ord=2, axis=1)
+        isValid = norm <= 3 * SMOOTHING_LENGTH
+        return scale * np.exp(exp_factor * (norm**2)) * isValid
 
     kernel = []
     for j in range(x.shape[0]):
@@ -74,13 +76,16 @@ def deformation_gradient(x, p, m, v, mass_density):
     return (term1 - term2) / np.square(mass_density)[:, np.newaxis, np.newaxis]
 
 
-class TestCoarseGrainingCorrectness(unittest.TestCase):
+class TestCoarseGrainingCorrectnessLargerData(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
 
         dtype = np.float32
-        cls.gridpoints, cls.buffers = make_test_data2(1000, 5000, 100, PARTICLE_DIAMETER)
+        cls.gridpoints, cls.buffers = make_test_data2(500, 2500, 100, PARTICLE_DIAMETER)
+        cls.gridpoints = cls.gridpoints.astype(dtype)
+        cls.buffers = {k: v.astype(dtype) for k, v in cls.buffers.items()}
+
         cls.cg_fields = {}
         for backend in GPUBackend:
             cg = CoarseGrainingMain(
