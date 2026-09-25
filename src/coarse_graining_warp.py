@@ -209,7 +209,10 @@ def coarseGrainingKernel(
     velocity = mom / rho
     displacement = mu / rho
 
-    # To calculate remaining fields now that we have all required data.
+    # To calculate remaining fields now that we have all required data. Calculation of the the deformation gradient is rewritten into
+    # a simplified form that makes use of previous calculations the displacement field and the velocity field.
+    # It holds that F = sum_a (-1 / (rho * R^2)) mass * gaussian_kernel * du_a * r^T, with sum_a over particles.
+    # The minus sign is hidden in the gaussianKernelFactor = -0.5 / (R * R).
     temperature = float(0.0)
     gradV = wp.mat33(0.0)
     gradU = wp.mat33(0.0)
@@ -222,9 +225,10 @@ def coarseGrainingKernel(
             kernel = gaussian_kernel(r2, gaussianKernelFactor, gaussianScale)
             M = mass[p] * kernel
             dv = vel[p] - velocity
+            du = u[p] - displacement
             temperature += kernel * wp.dot(dv, dv)
             gradV += M * wp.outer(dv, r)
-            gradU += M * wp.outer(u[p] - displacement, r)
+            gradU += M * wp.outer(du, r)
     gradScale = 2.0 * gaussianKernelFactor / rho
     gradV = gradScale * gradV
     gradU = gradScale * gradU
@@ -236,13 +240,6 @@ def coarseGrainingKernel(
     cg_fields.rate_of_strain_tensor[tid] = 0.5 * (gradV + wp.transpose(gradV))
 
 
-def _to_warp(a, dtype, device):
-    """Wraps a JAX array without copying, or copies a numpy array to the device, as float32."""
-    if isinstance(a, jax.Array):
-        return wp.from_jax(a.astype(np.float32), dtype=dtype)
-    return wp.array(np.ascontiguousarray(a, dtype=np.float32), dtype=dtype, device=device)
-
-
 def _hash_grid(device, name):
     key = (str(device), name)
     if key not in _hash_grids:
@@ -250,7 +247,7 @@ def _hash_grid(device, name):
     return _hash_grids[key]
 
 
-def coarseGrainingFields(gridPoints, args):
+def coarseGrainingFields(gridpoints, args):
     """
     Computes the coarse graining fields at all gridpoints. For general documentation,
     consult "Stress and strain in pseudo-particle solids.pdf".
@@ -261,13 +258,16 @@ def coarseGrainingFields(gridPoints, args):
             expected dictionary keys are defined "src/listeners/coarse_graining_calculation/coarse_graining_constants". The two parameters
             are expected to be "smoothingLength", and "particleDiameter".
     OUTPUTS:
-        fields: a dictionary containing all the computed fields as JAX arrays (float32). Keys are defined
+        fields: a dictionary containing all the computed fields as numpy arrays. Keys are defined
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
 
+    def numpy_to_warp(a, dtype, device):
+        return wp.array(np.ascontiguousarray(a, dtype=np.float32), dtype=dtype, device=device)
+
     device = wp.get_device(wp.get_preferred_device())
 
-    # Pre-compute some constants
+    # To build all input data, i.e particle data, contact data, precomputed parameters, and spatial hash grids.
     R = args["smoothingLength"]
     precomputed_params = PrecomputedParams()
     precomputed_params.gaussian_kernel_factor = -0.5 / (R * R)
@@ -278,27 +278,27 @@ def coarseGrainingFields(gridPoints, args):
     precomputed_params.particle_cutoff = 3.0 * R
     precomputed_params.particle_cutoff_sq = 9.0 * R * R
 
-    x = _to_warp(gridPoints, wp.vec3, device)
+    gridpoints = numpy_to_warp(gridpoints, wp.vec3, device)
 
     particle_data = ParticleData()
-    particle_data.pos = _to_warp(args[P_POS_KEY], wp.vec3, device)
-    particle_data.vel = _to_warp(args[P_VEL_KEY], wp.vec3, device)
-    particle_data.disp = _to_warp(args[P_DISP_KEY], wp.vec3, device)
-    particle_data.mass = _to_warp(args[P_MASS_KEY].reshape(-1), float, device)
+    particle_data.pos = numpy_to_warp(args[P_POS_KEY], wp.vec3, device)
+    particle_data.vel = numpy_to_warp(args[P_VEL_KEY], wp.vec3, device)
+    particle_data.disp = numpy_to_warp(args[P_DISP_KEY], wp.vec3, device)
+    particle_data.mass = numpy_to_warp(args[P_MASS_KEY].reshape(-1), float, device)
 
     contact_data = ContactData()
-    contact_data.pos = _to_warp(args[C_POS_KEY], wp.vec3, device)
-    contact_data.normal = _to_warp(args[C_NORMAL_KEY], wp.vec3, device)
+    contact_data.pos = numpy_to_warp(args[C_POS_KEY], wp.vec3, device)
+    contact_data.normal = numpy_to_warp(args[C_NORMAL_KEY], wp.vec3, device)
     nc = contact_data.pos.shape[0]
     contact_data.global_force = wp.empty(nc, dtype=wp.vec3, device=device)
     wp.launch(
         contact_force_to_global_frame,
         dim=nc,
         inputs=[
-            _to_warp(args[C_FORCE_KEY], wp.vec3, device),
+            numpy_to_warp(args[C_FORCE_KEY], wp.vec3, device),
             contact_data.normal,
-            _to_warp(args[C_TANGENT_U_KEY], wp.vec3, device),
-            _to_warp(args[C_TANGENT_V_KEY], wp.vec3, device),
+            numpy_to_warp(args[C_TANGENT_U_KEY], wp.vec3, device),
+            numpy_to_warp(args[C_TANGENT_V_KEY], wp.vec3, device),
         ],
         outputs=[contact_data.global_force],
         device=device,
@@ -310,7 +310,7 @@ def coarseGrainingFields(gridPoints, args):
     contact_hash_grid = _hash_grid(device, "contacts")
     contact_hash_grid.build(contact_data.pos, sqrt(3.0) * R)
 
-    ng = x.shape[0]
+    ng = gridpoints.shape[0]
     cg_fields = CGFields()
     cg_fields.mass_density = wp.empty(ng, dtype=float, device=device)
     cg_fields.momentum_density = wp.empty(ng, dtype=wp.vec3, device=device)
@@ -329,7 +329,7 @@ def coarseGrainingFields(gridPoints, args):
         inputs=[
             particle_hash_grid.id,
             contact_hash_grid.id,
-            x,
+            gridpoints,
             particle_data,
             contact_data,
             precomputed_params,
