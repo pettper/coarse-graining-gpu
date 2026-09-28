@@ -230,7 +230,7 @@ class CoarseGrainingWarp:
 
     def __init__(self):
         self.device = wp.get_device(wp.get_preferred_device())
-        self.hash_grid_dims = {"particle": (128, 128, 128), "contact": (256, 256, 256)}
+        self.hash_grid_dims = {"particle": (128, 128, 128), "contact": (128, 128, 128)}
         self.particle_hash_grid = wp.HashGrid(*self.hash_grid_dims["particle"], device=self.device)
         self.contact_hash_grid = wp.HashGrid(*self.hash_grid_dims["contact"], device=self.device)
 
