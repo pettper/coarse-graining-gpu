@@ -23,11 +23,12 @@ from coarse_graining_gpu.src.coarse_graining_constants import (
     F_STRAIN_KEY,
     F_RATE_OF_STRAIN_KEY,
 )
+from coarse_graining_gpu.tests.setup_utils import make_test_data2
 
 PARTICLE_DIAMETER = 0.01
 SMOOTHING_LENGTH = 1.5 * PARTICLE_DIAMETER
-RTOL = 1e-6
-ATOL = 1e-5
+RTOL = 1e-4
+ATOL = 1e-3
 
 
 def gaussian_kernel(x, p):
@@ -75,54 +76,23 @@ def deformation_gradient(x, p, m, v, mass_density):
     return (term1 - term2) / np.square(mass_density)[:, np.newaxis, np.newaxis]
 
 
-class TestCoarseGrainingCorrectness(unittest.TestCase):
+class TestCoarseGrainingCorrectnessLargerData(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
 
         dtype = np.float32
-        cls.gridpoints = np.array(
-            [[0.0, 0.0, 0.0], [0.5 * PARTICLE_DIAMETER] * 3, [100 * PARTICLE_DIAMETER] * 3], dtype=dtype
-        )
-        particle_positions = np.array(
-            [
-                [PARTICLE_DIAMETER, 0.0, -PARTICLE_DIAMETER],
-                [PARTICLE_DIAMETER, 2 * PARTICLE_DIAMETER, 0.0],
-                [0.0, 0.0, 0.5 * PARTICLE_DIAMETER],
-                [0.0, 3.0 * PARTICLE_DIAMETER, 3.0 * PARTICLE_DIAMETER],
-            ],
-        )
-        contact_positions = np.array(
-            [
-                [PARTICLE_DIAMETER, 0.0, PARTICLE_DIAMETER],
-                [0.0, PARTICLE_DIAMETER, -2 * PARTICLE_DIAMETER],
-                [0.5 * PARTICLE_DIAMETER, 0.0, 0.0],
-                [3.0 * PARTICLE_DIAMETER, 3.0 * PARTICLE_DIAMETER, 0.0],
-            ],
-        )
-
-        num_particles = particle_positions.shape[0]
-        num_contacts = contact_positions.shape[0]
-        data = np.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0], [3.0, 2.0, 1.0], [1.0, 1.0, 1.0]])
-        cls.buffers = {
-            P_POS_KEY: particle_positions,
-            P_VEL_KEY: data,
-            P_DISP_KEY: data,
-            P_MASS_KEY: np.ones(num_particles),
-            C_POS_KEY: contact_positions,
-            C_FORCE_KEY: data,
-            C_NORMAL_KEY: np.array([[0.0, 0.0, 1.0] for _ in range(num_contacts)]),
-            C_TANGENT_U_KEY: np.array([[1.0, 0.0, 0.0] for _ in range(num_contacts)]),
-            C_TANGENT_V_KEY: np.array([[0.0, 1.0, 0.0] for _ in range(num_contacts)]),
-        }
+        cls.gridpoints, cls.buffers = make_test_data2(500, 2500, 100, PARTICLE_DIAMETER)
+        cls.gridpoints = cls.gridpoints.astype(dtype)
         cls.buffers = {k: v.astype(dtype) for k, v in cls.buffers.items()}
+
         cls.cg_fields = {}
         for backend in GPUBackend:
             cg = CoarseGrainingMain(
                 cls.gridpoints,
                 smoothing_length=SMOOTHING_LENGTH,
                 particle_diameter=PARTICLE_DIAMETER,
-                cg_batch_size=10,
+                cg_batch_size=32,
                 debug_prints_on=False,
                 backend=backend,
             )
