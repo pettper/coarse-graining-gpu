@@ -6,15 +6,12 @@
 #
 # 2025-12-04: First public version, programmed by Petter Persson.
 
-import os
-from functools import partial
 from math import pi, sqrt, ceil
 from time import perf_counter
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from scipy.spatial import KDTree
 
 from .coarse_graining_constants import (
     C_FORCE_KEY,
@@ -326,13 +323,14 @@ def coarse_graining_batched(points_b, pidx_b, cidx_b, particle_data, contact_dat
     return fields
 
 
-def coarseGrainingFields(gridPoints, args, batch_size=1000, nns_method="grid"):
+def coarseGrainingFields(gridpoints, gridlimits, args, batch_size=1000):
     """
     Computes the coarse graining fields at all gridpoints. For general documentation,
     consult "Stress and strain in pseudo-particle solids.pdf".
     CALL SEQUENCE: fields = coarseGrainingFields(gridPoints, args, batch_size=1000)
     INPUTS:
         gridPoints: array of gridpoint coordinates (x, y, z), size ng x 3.
+        gridlimits: array=[xmin, ymin, zmin, xmax, ymax, zmax]. User is responsible for ensuring that the gridlimits are correct.
         args: dictionary containing all required particle buffers and the parameters, smoothing length and particle diameter.
             expected dictionary keys are defined "src/listeners/coarse_graining_calculation/coarse_graining_constants". The two parameters
             are expected to be "smoothingLength", and "particleDiamter".
@@ -343,17 +341,21 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000, nns_method="grid"):
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
 
-    # To determine the number of particles to include when approximating the cutoff |x| > 3*R (2-norm). rho * (large sphere / small sphere) -> rho * (3R)^3 / (r^3).
-    num_cutoff_particles = ceil(
-        PARTICLE_PACKING_DENSITY * ((3 * args["smoothingLength"]) ** 3) / ((0.5 * args["particleDiameter"]) ** 3)
-    )
+    def get_num_cutoff(V_cell, V_particle):
+        V_cutoff_grid = 27*V_cell
+        return ceil(PARTICLE_PACKING_DENSITY * V_cutoff_grid / V_particle)
+
+    cell_size_particles = 3*args["smoothingLength"]
+    cell_size_contacts = args["smoothingLength"]
+
+    # To determine the number of particles to include when approximating the cutoff |x| > 3*R (2-norm). rho * (box_volume / small sphere) -> rho * (3R)^3 / (r^3).
+    V_cell = (3*args["smoothingLength"])**3
+    V_particle = (4/3)*pi*((0.5 * args["particleDiameter"]) ** 3)
+    num_cutoff_particles = get_num_cutoff(V_cell, V_particle)
 
     # To determine the number of contacts to include when approximating the cutoff |x| > R (1-norm). rho * (box_volume / small_sphere_volume) -> rho * (8R)^3 / ((4/3)*pi*r^3).
-    num_cutoff_contacts = CONTACTS_PER_PARTICLE * ceil(
-        PARTICLE_PACKING_DENSITY
-        * (8 * (args["smoothingLength"] ** 3))
-        / ((4 / 3) * pi * ((0.5 * args["particleDiameter"]) ** 3))
-    )
+    V_cell = args["smoothingLength"]**3
+    num_cutoff_contacts = CONTACTS_PER_PARTICLE * get_num_cutoff(V_cell, V_particle)
 
     # Pre-compute some constants
     R = args["smoothingLength"]
@@ -377,35 +379,21 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000, nns_method="grid"):
         "particleDiameter": args["particleDiameter"],
     }
 
-    if nns_method == "tree":
-        start = perf_counter()
-        particle_tree = KDTree(args[P_POS_KEY])
-        contact_tree = KDTree(args[C_POS_KEY])
-        print("Build Trees CPU time:", perf_counter() - start)
-        start = perf_counter()
-        _, pidx = particle_tree.query(
-            gridPoints, k=num_cutoff_particles, distance_upper_bound=3 * args["smoothingLength"], p=2, workers=-1
-        )
-        _, cidx = contact_tree.query(
-            gridPoints, k=num_cutoff_contacts, distance_upper_bound=args["smoothingLength"], p=jnp.inf, workers=-1
-        )
-        print("Tree query CPU time:", perf_counter() - start)
-    else:
-        start = perf_counter()
-        limits = (*gridPoints.min(0), *gridPoints.max(0))
-        pidx, p_over = query_spatial_grid(build_spatial_grid(limits, args[P_POS_KEY], 3 * args["smoothingLength"]), gridPoints, k=num_cutoff_particles, max_candidates=num_cutoff_particles, ord=2, batch_size=batch_size)
-        cidx, c_over = query_spatial_grid(build_spatial_grid(limits, args[C_POS_KEY], args["smoothingLength"]), gridPoints, k=num_cutoff_contacts, max_candidates=num_cutoff_contacts, ord=jnp.inf, batch_size=batch_size)
-        print("Spatial build and query time:", perf_counter() - start)
+    start = perf_counter()
+    pidx, is_overflow_p = query_spatial_grid(build_spatial_grid(gridlimits, args[P_POS_KEY], cell_size_particles), gridpoints, max_candidates=num_cutoff_particles, ord=2, batch_size=batch_size)
+    cidx, is_overflow_c = query_spatial_grid(build_spatial_grid(gridlimits, args[C_POS_KEY], cell_size_contacts), gridpoints, max_candidates=num_cutoff_contacts, ord=jnp.inf, batch_size=batch_size)
+    assert not (is_overflow_p.any() or is_overflow_c.any())
+    print("Spatial grid build and query time:", perf_counter() - start)
 
 
-    gridPoints = jnp.asarray(gridPoints)
+    gridpoints = jnp.asarray(gridpoints)
     pidx = jnp.asarray(pidx, dtype=jnp.int32)
     cidx = jnp.asarray(cidx, dtype=jnp.int32)
 
     def run_batches(start_idx, end_idx, nb):
         """Scans over nb equally sized batches of the gridpoints start_idx:end_idx."""
         return coarse_graining_batched(
-            gridPoints[start_idx:end_idx].reshape(nb, -1, 3),
+            gridpoints[start_idx:end_idx].reshape(nb, -1, 3),
             pidx[start_idx:end_idx].reshape(nb, -1, pidx.shape[1]),
             cidx[start_idx:end_idx].reshape(nb, -1, cidx.shape[1]),
             particle_data,
@@ -414,7 +402,7 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000, nns_method="grid"):
         )
 
     # To perform a batched scan of coarse graining calculations over gridpoints.
-    ng = gridPoints.shape[0]
+    ng = gridpoints.shape[0]
     nb = ng // batch_size
     ng_batched = nb * batch_size
     if nb > 0:
