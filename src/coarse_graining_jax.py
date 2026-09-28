@@ -377,7 +377,6 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000, nns_method="grid"):
         "particleDiameter": args["particleDiameter"],
     }
 
-    print(f"Using {nns_method} for nearest neighbour search", flush=True)
     if nns_method == "tree":
         start = perf_counter()
         particle_tree = KDTree(args[P_POS_KEY])
@@ -392,10 +391,11 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000, nns_method="grid"):
         )
         print("Tree query CPU time:", perf_counter() - start)
     else:
+        start = perf_counter()
         limits = (*gridPoints.min(0), *gridPoints.max(0))
-        pidx, p_over = query_spatial_grid(build_spatial_grid(limits, args[P_POS_KEY], 3 * args["smoothingLength"]), gridPoints, k=num_cutoff_particles, max_candidates=num_cutoff_particles, ord=2)
-        cidx, c_over = query_spatial_grid(build_spatial_grid(limits, args[C_POS_KEY], args["smoothingLength"]), gridPoints, k=num_cutoff_contacts, max_candidates=num_cutoff_contacts, ord=jnp.inf)
-
+        pidx, p_over = query_spatial_grid(build_spatial_grid(limits, args[P_POS_KEY], 3 * args["smoothingLength"]), gridPoints, k=num_cutoff_particles, max_candidates=num_cutoff_particles, ord=2, batch_size=batch_size)
+        cidx, c_over = query_spatial_grid(build_spatial_grid(limits, args[C_POS_KEY], args["smoothingLength"]), gridPoints, k=num_cutoff_contacts, max_candidates=num_cutoff_contacts, ord=jnp.inf, batch_size=batch_size)
+        print("Spatial build and query time:", perf_counter() - start)
 
 
     gridPoints = jnp.asarray(gridPoints)
