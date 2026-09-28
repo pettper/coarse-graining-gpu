@@ -11,9 +11,7 @@ from enum import Enum
 
 # AGX imports
 import jax
-import jax.numpy as jnp
 import numpy as np
-from scipy.spatial import KDTree
 
 from .src.coarse_graining_constants import (
     C_FORCE_KEY,
@@ -51,7 +49,7 @@ class CoarseGrainingMain:
         C_TANGENT_V_KEY,
         C_POS_KEY,
     }
-    STANDARD_PARTICLE_BUFFER_SIZE = 1024
+    STANDARD_PARTICLE_BUFFER_SIZE = 4096
     STANDARD_GRIDPOINTS_BUFFER_SIZE = 256
 
     def __init__(
@@ -123,29 +121,30 @@ class CoarseGrainingMain:
                     in "coarse_graining_constants.py". In addition, the gridpoints are included.
         """
         input_buffers = self._validate_input_buffers(input_buffers)
-        if self.backend == GPUBackend.JAX:
-            # This required for the JAX-implementation to logically work correctly.
-            input_buffers = self._domainCutoff(input_buffers)
-        else:
-            pass  # Warp does not care about sizes, and code runs faster in tests if we just send our input data.
+        input_buffers = self._prepare_input_buffers(input_buffers)
 
         args = {**input_buffers, **self.params}
         fields = self.coarseGrainingFields(
             self.gridpoints,
+            self.gridlimits,
             args,
             batch_size=self.cg_batch_size,
         )
         fields = {k: v[: self.number_of_gridpoints] for k, v in fields.items()}
         return fields
 
-    def update_gridpoints(self, gridpoints):
+    def update_gridpoints(self, gridpoints, gridlimits=None):
         """
         This function is used to update the gridpoints.
 
         INPUTS:
             gridpoints: New gridpoints stored in an nx3 array.
+            gridlimits: array=[xmin, ymin, zmin, xmax, ymax, zmax] 
+                        Gridlimits can be supplied for performance reasons. If not supplied, the gridlimits are calculated from the gridpoints.
+                        If supplied, the user is responsible for ensuring that the gridlimits are correct.
         """
 
+        assert gridlimits is None or (gridlimits.ndim == 1 and len(gridlimits) == 6)
         assert gridpoints.ndim == 2 and gridpoints.shape[1] == 3
         self.number_of_gridpoints = gridpoints.shape[0]
 
@@ -163,6 +162,12 @@ class CoarseGrainingMain:
         else:
             self.gridpoints = np.asarray(gridpoints)
 
+        if gridlimits is None:
+            # Remember that gridpoints is a padded buffer, so we need to use the original gridpoints.
+            self.gridlimits = np.array((*self.gridpoints[:self.number_of_gridpoints].min(0), *self.gridpoints[:self.number_of_gridpoints].max(0)))
+        else:
+            self.gridlimits = gridlimits
+
     def set_particle_diameter(self, particle_diameter):
         self.params["particleDiameter"] = particle_diameter
 
@@ -174,48 +179,44 @@ class CoarseGrainingMain:
         self.backend = backend
         if self.backend == GPUBackend.WARP:
             self._warp_cg = CoarseGrainingWarp() if self._warp_cg is None else self._warp_cg
-            self.coarseGrainingFields = lambda gp, args, batch_size: self._warp_cg.coarseGrainingFields(gp, args)
+            self.coarseGrainingFields = lambda gp, gridlimits, args, batch_size: self._warp_cg.coarseGrainingFields(gp, args)
         elif self.backend == GPUBackend.JAX:
             self.coarseGrainingFields = cg_fields_jax
         else:
             raise NotImplementedError(f"Backend {backend} not implemented.")
         return self.backend
 
-    def _domainCutoff(self, input_buffers):
-        """
-        Removes particles that are outside the current grid.
-        """
-
-        def pick_indices(pos, mins, maxs):
-            """
-            Finds indexes of particle inside the grid limits.
-            Returns: A buffer of length 'size' containing the indices of particles/contacts inside 'limits'
-            """
-            return np.flatnonzero(np.all((pos >= mins) & (pos <= maxs), axis=1))
+    def _prepare_input_buffers(self, input_buffers):
 
         smoothing_length = self.params["smoothingLength"]
-        mins = self.gridpoints[: self.number_of_gridpoints].min(axis=0) - 3.0 * smoothing_length
-        maxs = self.gridpoints[: self.number_of_gridpoints].max(axis=0) + 3.0 * smoothing_length
-        particleIndices = pick_indices(input_buffers[P_POS_KEY], mins, maxs)
-        contactIndices = pick_indices(input_buffers[C_POS_KEY], mins, maxs)
-        n_particles, n_contacts = self._set_particle_buffer_sizes(particleIndices.size, contactIndices.size)
+        maxs = self.gridlimits[:3] + 3.0 * smoothing_length
 
-        position_pad_value = maxs.max() + 100 * smoothing_length  # Important for to pad outside grid for correctness.
-        for key, buffer in input_buffers.items():
-            if key in [P_POS_KEY, P_VEL_KEY, P_DISP_KEY, P_MASS_KEY]:
-                input_buffers[key] = self._buffer_pad(
-                    buffer[particleIndices], n_particles, pad_value=position_pad_value if key == P_POS_KEY else 0.0
-                )
-            elif key in [
-                C_FORCE_KEY,
-                C_POS_KEY,
-                C_NORMAL_KEY,
-                C_TANGENT_U_KEY,
-                C_TANGENT_V_KEY,
-            ]:
-                input_buffers[key] = self._buffer_pad(
-                    buffer[contactIndices], n_contacts, pad_value=position_pad_value if key == C_POS_KEY else 0.0
-                )
+        if self.backend == GPUBackend.JAX:
+            num_particles = input_buffers[P_POS_KEY].shape[0]
+            num_contacts = input_buffers[C_POS_KEY].shape[0]
+            num_particles, num_contacts = self._set_particle_buffer_sizes(num_particles, num_contacts)
+
+            position_pad_value = maxs.max() + 100 * smoothing_length  # Important for to pad outside grid for correctness.
+            for key, buffer in input_buffers.items():
+                if key in [P_POS_KEY, P_VEL_KEY, P_DISP_KEY, P_MASS_KEY]:
+                    input_buffers[key] = self._buffer_pad(
+                        buffer, num_particles, pad_value=position_pad_value if key == P_POS_KEY else 0.0
+                    )
+                elif key in [
+                    C_FORCE_KEY,
+                    C_POS_KEY,
+                    C_NORMAL_KEY,
+                    C_TANGENT_U_KEY,
+                    C_TANGENT_V_KEY,
+                ]:
+                    input_buffers[key] = self._buffer_pad(
+                        buffer, num_contacts, pad_value=position_pad_value if key == C_POS_KEY else 0.0
+                    )
+        elif self.backend == GPUBackend.WARP:
+            pass  # Warp does not care about sizes, and code runs faster in tests if we just send our input data.
+        else:
+            raise NotImplementedError(f"Backend {self.backend} not implemented.")
+        
         return input_buffers
 
     def _validate_input_buffers(self, input_buffers):
@@ -249,7 +250,7 @@ class CoarseGrainingMain:
     @staticmethod
     def _buffer_pad(buffer, size, pad_value=0.0):
         """
-        Adds a zero padding along axis=0, result is (size, -1). Using pad_value=None does not assign any value to the padded entries, useful for performance.
+        Adds a padding along axis=0, result is (size, -1). Using pad_value=None does not assign any value to the padded entries, useful for performance.
         """
         n = buffer.shape[0]
         dtype = jax.dtypes.canonicalize_dtype(buffer.dtype)

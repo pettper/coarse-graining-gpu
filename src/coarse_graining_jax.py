@@ -6,15 +6,12 @@
 #
 # 2025-12-04: First public version, programmed by Petter Persson.
 
-import os
 from functools import partial
 from math import pi, sqrt, ceil
-from time import perf_counter
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from scipy.spatial import KDTree
 
 from .coarse_graining_constants import (
     C_FORCE_KEY,
@@ -37,50 +34,40 @@ from .coarse_graining_constants import (
     P_POS_KEY,
     P_VEL_KEY,
 )
+from .utils.spatial_grid_jax import build_spatial_grid, query_spatial_grid
 
-PARTICLE_PACKING_DENSITY = 0.75
+PARTICLE_PACKING_DENSITY = 0.80
 CONTACTS_PER_PARTICLE = 8
 
 
 @jax.jit
-def computeGaussianKernel(factor, scale, x, p):
+def computeGaussianKernel(factor, scale, r):
     """
     Computes the gaussian kernel phi(x, p), returns phi(x,p) = scale*exp(factor*(abs(x-p)^2)).
-    CALL SEQUENCE: phi = computeGaussianKernel(factor, scale, x, p)
+    CALL SEQUENCE: phi = computeGaussianKernel(factor, scale, r)
     INPUTS:
         factor: Pre-computed factor in the exponential.
         scale: Pre computed normalization constant.
-        x: a gridpoint coordinate (x,y,z), size (3,).
-        p: array of particle positions, size np x 3
+        r: array of separations x - p between a gridpoint x and the particle positions p, size np x 3.
     OUTPUTS:
         phi: array of size (np,) containing the results for each particle.
     """
-    return jnp.multiply(
-        scale,
-        jnp.exp(jnp.multiply(factor, jnp.sum(jnp.square(jnp.subtract(x, p)), axis=1))),
-    )
+    return scale * jnp.exp(factor * jnp.sum(r * r, axis=1))
 
 
 @jax.jit
-def computeGranularTemperature(particleVelocity, velocity, kernel):
+def computeGranularTemperature(dv, kernel):
     """
     Computes the granular temperature field from the particle velocities and
     the coarse graining velocity field, at a single gridpoint. See eq. 4 in "Stress and strain in pseudo-particle solids.pdf".
-    CALL SEQUENCE: T = computeGranularTemperature(particleVelocity, velocity, kernel)
+    CALL SEQUENCE: T = computeGranularTemperature(dv, kernel)
     INPUTS:
-        particleVelocity: array of particle velocities, size np x 3.
-        velocity: coarse graining velocity field at a single gridpoint, size (3,)
+        dv: array of particle velocities minus the coarse graining velocity at the gridpoint, size np x 3.
         kernel: array of gaussian kernel values, size (np,)
     OUTPUTS:
         T: The granular temperature field at a single gridpoint, scalar value.
     """
-    return jnp.dot(
-        jnp.sum(
-            jnp.square(jnp.subtract(particleVelocity, velocity)),
-            axis=1,
-        ),
-        kernel,
-    )
+    return jnp.dot(kernel, jnp.sum(dv * dv, axis=1))
 
 
 @jax.jit
@@ -98,66 +85,59 @@ def computeKineticStress(M, particleVelocities):
 
 
 @jax.jit
-def computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv):
+def computeGlobalContactForce(cf, cn, ctu, ctv):
+    """
+    Rotates the contact forces from the local contact frame (cn, ctu, ctv) to the global frame.
+    CALL SEQUENCE: cf_global = computeGlobalContactForce(cf, cn, ctu, ctv)
+    INPUTS:
+        cf: array of contact forces in a local frame, size nc x 3.
+        cn: array of contact normal vectors, size nc x 3.
+        ctu: array of contact tangent vectors, size nc x 3.
+        ctv: array of contact tangent vectors, size nc x 3.
+    OUTPUTS:
+        cf_global: array of contact forces in the global frame, size nc x 3.
+    """
+    return cf[:, 0:1] * cn + cf[:, 1:2] * ctu + cf[:, 2:3] * ctv
+
+
+@jax.jit
+def computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn):
     """
     Computes the contact stress tensor according to eq. 22 in "Stress and strain in pseudo-particle solids.pdf".
-    CALL SEQUENCE: sigma = computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv):
+    CALL SEQUENCE: sigma = computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn):
     INPUTS:
         heavisideScale: Pre-computed scaling constant for the Heaviside kernel.
         particleDiameter: Mean particle diameter for all particles.
         smoothingLength: Kernel smoothing length.
         x: a gridpoint coordinate (x,y,z), size (3,).
-        cf: array of contact forces in a local frame, size nc x 3.
+        cf: array of contact forces in the global frame, size nc x 3.
         cp: array of contact positions, size nc x 3.
         cn: array of contact normal vectors, size nc x 3.
-        ctu: array of contact tangent vectors, size nc x 3.
-        ctv: array of contact tangent vectors, size nc x 3.
     OUTPUTS:
         sigma: The contact stress tensor at x, size 3 x 3.
     """
-    return jnp.multiply(
-        -heavisideScale,
-        jnp.einsum(
-            "ij,ik->jk",
-            jnp.multiply(
-                jnp.add(
-                    jnp.add(
-                        jnp.einsum("i,ij->ij", cf[:, 0], cn),
-                        jnp.einsum("i,ij->ij", cf[:, 1], ctu),
-                    ),
-                    jnp.einsum("i,ij->ij", cf[:, 2], ctv),
-                ),
-                jnp.all(jnp.absolute(x - cp) <= smoothingLength, axis=1)[:, None],
-            ),
-            jnp.multiply(particleDiameter, cn),
-        ),
-    )
+    inside = jnp.all(jnp.abs(x - cp) <= smoothingLength, axis=1)  # (nc,)
+    return -heavisideScale * particleDiameter * jnp.einsum("ij,ik->jk", cf * inside[:, None], cn)
 
 
-@jax.jit  # genericVectorField is either displacement or velocity
-def computeDeformationGradient(M, x, p, massDensity, genericVectorField, gaussianKernelFactor):
+@jax.jit
+def computeDeformationGradient(M, r, dw, massDensity, gaussianKernelFactor):
     """
     Computes the deformation gradient according to eq. 12 in "Stress and strain in pseudo-particle solids.pdf".
-    CALL_SEQUENCE: F = computeDeformationGradient(M, x, p, massDensity, genericVectorField, gaussianKernelFactor)
+    Eq. 12 is rewritten in the same centred form as in the warp implementation,
+    F = sum_i (2 * gaussianKernelFactor / rho) * M_i * dw_i r_i^T, which avoids the double sum over particles
+    and the cancellation between its two terms. The minus sign is hidden in gaussianKernelFactor = -0.5 / R^2.
+    CALL_SEQUENCE: F = computeDeformationGradient(M, r, dw, massDensity, gaussianKernelFactor)
     INPUTS:
         M: array containing particle mass * phi(x,p), size (np,).
-        x: a gridpoint coordinate (x,y,z), size (3,).
-        p: array of particle positions, size np x 3.
+        r: array of separations x - p between a gridpoint x and the particle positions p, size np x 3.
+        dw: array of a particle vector field (velocity or displacement) minus its coarse graining field at x, size np x 3.
         massDensity: mass density field at gridpoint x, scalar.
-        genericVectorField: array of a generic particle vector field, size np x 3.
         gaussianKernelFactor: Pre-computed scaling constant in the gaussian kernel exponential.
     OUTPUTS:
         F: The deformation gradient tensor, size 3 x 3.
     """
-    d = jnp.multiply(2.0 * gaussianKernelFactor, x - p)  # (np, 3)
-    return jnp.divide(
-        jnp.subtract(
-            jnp.einsum("i,j,ik,il->kl", M, M, genericVectorField, d),
-            jnp.einsum("i,j,jk,il->kl", M, M, genericVectorField, d),
-        ),
-        jnp.multiply(massDensity, massDensity),
-    )
-
+    return (2.0 * gaussianKernelFactor / massDensity) * jnp.einsum("i,ik,il->kl", M, dw, r)
 
 @jax.jit
 def coarseGrainingFieldsAtPosition(
@@ -185,11 +165,9 @@ def coarseGrainingFieldsAtPosition(
     m = particle_data[P_MASS_KEY]
     validParticles = particle_data["validParticles"]
 
-    cf = contact_data[C_FORCE_KEY]
+    cf_global = contact_data[C_FORCE_KEY]  # in the global frame
     cp = contact_data[C_POS_KEY]
     cn = contact_data[C_NORMAL_KEY]
-    ctu = contact_data[C_TANGENT_U_KEY]
-    ctv = contact_data[C_TANGENT_V_KEY]
     validContacts = contact_data["validContacts"]
 
     gaussianKernelFactor = precomputed_params["gaussianKernelFactor"]
@@ -199,139 +177,88 @@ def coarseGrainingFieldsAtPosition(
     particleDiameter = precomputed_params["particleDiameter"]
 
     # To mask out invalid particles and contacts, those are set to zero, and this propagates thorough all calculations.
-    kernel = computeGaussianKernel(gaussianKernelFactor, gaussianScale, x, p) * validParticles  # (np,)
-    cf = cf * validContacts[:, jnp.newaxis]
+    r = x - p  # (np, 3), shared by the kernel and the gradients
+    kernel = computeGaussianKernel(gaussianKernelFactor, gaussianScale, r) * validParticles  # (np,)
+    cf_global = cf_global * validContacts[:, jnp.newaxis]
 
-    # Contract over particles to obtain mass density and momentum density fields
-    M = jnp.multiply(m, kernel)  # (np,)
-    massDensity = jnp.sum(M)  # jnp.einsum("i->", M)
-    momentumDensity = jnp.dot(M, v)  # jnp.einsum("i,ij->j", M, v)
-    velocity = jnp.divide(momentumDensity, massDensity)
-    granularTemperature = computeGranularTemperature(v, velocity, kernel)
+    # Contract over particles to obtain mass density, momentum density, velocity and displacement fields
+    M = m * kernel  # (np,)
+    massDensity = jnp.sum(M)
+    momentumDensity = M @ v
+    velocity = momentumDensity / massDensity
+    displacement = (M @ u) / massDensity
 
     # stress tensor
-    stressTensor = jnp.add(
-        computeKineticStress(M, v),
-        computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf, cp, cn, ctu, ctv),
-    )
+    stressTensor = computeKineticStress(M, v) + computeContactStress(heavisideScale, particleDiameter, smoothingLength, x, cf_global, cp, cn)
+    pressure = -jnp.trace(stressTensor) / 3.0
 
-    pressure = jnp.multiply(-0.333333333333, jnp.trace(stressTensor))
+    # von mises stress = sqrt(3.0/2.0*(stress_ij * stress_ij - 3*pressure ** 2)), clamped against round-off below zero
+    vonMisesStress = jnp.sqrt(jnp.maximum(1.5 * (jnp.sum(stressTensor * stressTensor) - 3.0 * pressure * pressure), 0.0))
 
-    # von mises stress = sqrt(3.0/2.0*(stress_ij * stress_ij - 3*pressure ** 2)), this expression has been simplified
-    vonMisesStress = jnp.sqrt(
-        jnp.multiply(
-            1.5,
-            jnp.subtract(
-                jnp.einsum("jk,jk->", stressTensor, stressTensor),
-                jnp.multiply(3.0, jnp.square(pressure)),
-            ),
-        )
-    )
+    # Deviations from the coarse graining velocity and displacement, shared by the granular temperature and the gradients.
+    # If the mass density is zero, velocity and displacement are NaN, and so are the fields computed from dv and du.
+    dv = v - velocity
+    du = u - displacement
+    granularTemperature = computeGranularTemperature(dv, kernel)
 
-    # displacement field
-    # jnp.einsum("i,ij->j", M, u)
-    displacement = jnp.divide(jnp.dot(M, u), massDensity)
+    gradV = computeDeformationGradient(M, r, dv, massDensity, gaussianKernelFactor)
+    rateOfStrainTensor = 0.5 * (gradV + gradV.T)
 
-    # Rate of strain tensor is a double contraction over particles
-    deform_grad = computeDeformationGradient(M, x, p, massDensity, v, gaussianKernelFactor)
-    rateOfStrainTensor = jnp.multiply(0.5, jnp.add(deform_grad, deform_grad.T))
+    gradU = computeDeformationGradient(M, r, du, massDensity, gaussianKernelFactor)
+    strainTensor = 0.5 * (gradU + gradU.T)
 
-    # Strain tensor
-    deform_grad = computeDeformationGradient(M, x, p, massDensity, u, gaussianKernelFactor)
-    strainTensor = jnp.multiply(0.5, jnp.add(deform_grad, deform_grad.T))
-
-    return (
-        massDensity,
-        momentumDensity,
-        velocity,
-        displacement,
-        granularTemperature,
-        pressure,
-        vonMisesStress,
-        stressTensor,
-        strainTensor,
-        rateOfStrainTensor,
-    )
-
-
-# Scan body compatible with jax.lax.scan
-@jax.jit
-def coarse_graining_body(carry, x):
-    """
-    Body function for jax.lax.scan function. See official documentation for jax.lax.scan.
-    INPUTS:
-        carry: Expects a tuple of dictionaries (particle_data, contact_data, precomputed_params) containing all particle data and pre-computed constants. Some of the
-            keys are defined in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
-        x: array of gridpoints, size ng x 3.
-    OUTPUTS:
-        carry: same as input.
-        fields: a dictionary containing all the computed fields. Keys are defined
-                in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
-    """
-
-    particle_data, contact_data, precomputed_params = carry
-
-    # Create a vectorized map over the input for the gridpoints x.
-    cg_vmap = jax.vmap(
-        coarseGrainingFieldsAtPosition,
-        in_axes=(0, 0, 0, None),
-    )
-
-    # Call coarse graining calculation to get all fields at x.
-    fields = cg_vmap(x, particle_data, contact_data, precomputed_params)
-
-    return carry, {
-        F_MASS_DENSITY_KEY: fields[0],
-        F_MOM_DENSITY_KEY: fields[1],
-        F_VEL_KEY: fields[2],
-        F_DISP_KEY: fields[3],
-        F_GRANULAR_TEMP_KEY: fields[4],
-        F_PRESSURE_KEY: fields[5],
-        F_VON_MISES_KEY: fields[6],
-        F_STRESS_KEY: fields[7],
-        F_STRAIN_KEY: fields[8],
-        F_RATE_OF_STRAIN_KEY: fields[9],
+    return {
+        F_MASS_DENSITY_KEY: massDensity,
+        F_MOM_DENSITY_KEY: momentumDensity,
+        F_VEL_KEY: velocity,
+        F_DISP_KEY: displacement,
+        F_GRANULAR_TEMP_KEY: granularTemperature,
+        F_PRESSURE_KEY: pressure,
+        F_VON_MISES_KEY: vonMisesStress,
+        F_STRESS_KEY: stressTensor,
+        F_STRAIN_KEY: strainTensor,
+        F_RATE_OF_STRAIN_KEY: rateOfStrainTensor,
     }
 
 
-@jax.jit
-def coarse_graining_batched(points_b, pidx_b, cidx_b, particle_data, contact_data, precomputed_params):
+@partial(jax.jit, static_argnames=("batch_size",))
+def coarse_graining_mapped(gridpoints, pidx, cidx, particle_data, contact_data, precomputed_params, batch_size):
     """
-    Runs coarse_graining_body over batches of gridpoints with jax.lax.scan, gathering the
-    neighbour data of each batch on the device.
+    Computes the coarse graining fields at every gridpoint with jax.lax.map, which splits the
+    gridpoints into batches of batch_size, vmaps over each batch and handles the remainder.
+    Each gridpoint gathers its own neighbour data on the device.
     INPUTS:
-        points_b: gridpoints, size (num_batches, batch_size, 3).
-        pidx_b: particle neighbour indices, size (num_batches, batch_size, kp).
-        cidx_b: contact neighbour indices, size (num_batches, batch_size, kc).
+        gridpoints: gridpoints, size (ng, 3).
+        pidx: particle neighbour indices, size (ng, kp).
+        cidx: contact neighbour indices, size (ng, kc).
         particle_data, contact_data: dicts with the full (unbatched) buffers.
         precomputed_params: dict with precomputed parameters.
+        batch_size: number of gridpoints computed in parallel.
     OUTPUTS:
-        fields: dict of fields, each of size (num_batches, batch_size, ...).
+        fields: dict of fields, each of size (ng, ...). Keys are defined
+            in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
+    num_particles = particle_data[P_POS_KEY].shape[0]
+    num_contacts = contact_data[C_POS_KEY].shape[0]
 
-    def scan_body(carry, batch):
-        x, bp, bc = batch
-        batch_particle_data = {key: buf[bp] for key, buf in particle_data.items()} | {
-            "validParticles": bp < particle_data[P_POS_KEY].shape[0]
-        }
-        batch_contact_data = {key: buf[bc] for key, buf in contact_data.items()} | {
-            "validContacts": bc < contact_data[C_POS_KEY].shape[0]
-        }
-        batch_carry = (batch_particle_data, batch_contact_data, precomputed_params)
-        _, fields = coarse_graining_body(batch_carry, x)
-        return carry, fields
-
-    _, fields = jax.lax.scan(scan_body, None, (points_b, pidx_b, cidx_b))
-    return fields
+    def fields_at_point(args):
+        x, ip, ic = args  # (3,), (kp,), (kc,)
+        input_particles_data = {key: buf[ip] for key, buf in particle_data.items()} | {"validParticles": ip < num_particles}
+        input_contact_data = {key: buf[ic] for key, buf in contact_data.items()} | {"validContacts": ic < num_contacts}
+        fields = coarseGrainingFieldsAtPosition(x, input_particles_data, input_contact_data, precomputed_params)
+        return fields
+    
+    return jax.lax.map(fields_at_point, (gridpoints, pidx, cidx), batch_size=batch_size)
 
 
-def coarseGrainingFields(gridPoints, args, batch_size=1000):
+def coarseGrainingFields(gridpoints, gridlimits, args, batch_size=1000, debug_prints_on=False):
     """
     Computes the coarse graining fields at all gridpoints. For general documentation,
     consult "Stress and strain in pseudo-particle solids.pdf".
     CALL SEQUENCE: fields = coarseGrainingFields(gridPoints, args, batch_size=1000)
     INPUTS:
         gridPoints: array of gridpoint coordinates (x, y, z), size ng x 3.
+        gridlimits: array=[xmin, ymin, zmin, xmax, ymax, zmax]. User is responsible for ensuring that the gridlimits are correct.
         args: dictionary containing all required particle buffers and the parameters, smoothing length and particle diameter.
             expected dictionary keys are defined "src/listeners/coarse_graining_calculation/coarse_graining_constants". The two parameters
             are expected to be "smoothingLength", and "particleDiamter".
@@ -342,17 +269,21 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
 
-    # To determine the number of particles to include when approximating the cutoff |x| > 3*R (2-norm). rho * (large sphere / small sphere) -> rho * (3R)^3 / (r^3).
-    num_cutoff_particles = ceil(
-        PARTICLE_PACKING_DENSITY * ((3 * args["smoothingLength"]) ** 3) / ((0.5 * args["particleDiameter"]) ** 3)
-    )
+    def get_max_count(V_region, V_particle):
+        """Maximum number of particles in a region of volume V_region, given by the packing density."""
+        return ceil(PARTICLE_PACKING_DENSITY * V_region / V_particle)
 
-    # To determine the number of contacts to include when approximating the cutoff |x| > R (1-norm). rho * (box_volume / small_sphere_volume) -> rho * (8R)^3 / ((4/3)*pi*r^3).
-    num_cutoff_contacts = CONTACTS_PER_PARTICLE * ceil(
-        PARTICLE_PACKING_DENSITY
-        * (8 * (args["smoothingLength"] ** 3))
-        / ((4 / 3) * pi * ((0.5 * args["particleDiameter"]) ** 3))
-    )
+    cell_size_particles = 3*args["smoothingLength"]
+    cell_size_contacts = args["smoothingLength"]
+    V_particle = (4/3)*pi*((0.5 * args["particleDiameter"]) ** 3)
+
+    # Particles: the candidates are the particles in the 27 cells around a gridpoint, and the neighbours are those within the cutoff |x - p| <= 3*R (2-norm).
+    max_candidates_particles = get_max_count(27 * cell_size_particles**3, V_particle)
+    max_neighbours_particles = get_max_count((4/3) * pi * cell_size_particles**3, V_particle)
+
+    # Contacts: the candidates are the contacts in the 27 cells around a gridpoint, and the neighbours are those within the cutoff |x - c| <= R (inf-norm).
+    max_candidates_contacts = CONTACTS_PER_PARTICLE * get_max_count(27 * cell_size_contacts**3, V_particle)
+    max_neighbours_contacts = CONTACTS_PER_PARTICLE * get_max_count((2 * cell_size_contacts)**3, V_particle)
 
     # Pre-compute some constants
     R = args["smoothingLength"]
@@ -369,68 +300,30 @@ def coarseGrainingFields(gridPoints, args, batch_size=1000):
         P_DISP_KEY: args[P_DISP_KEY],
         P_MASS_KEY: args[P_MASS_KEY].flatten(),
     }
-    contact_data = {key: args[key] for key in (C_FORCE_KEY, C_POS_KEY, C_NORMAL_KEY, C_TANGENT_U_KEY, C_TANGENT_V_KEY)}
+    particle_data = {k: jnp.asarray(v) for k, v in particle_data.items()}
+    contact_data = {
+        C_FORCE_KEY: args[C_FORCE_KEY],
+        C_POS_KEY: args[C_POS_KEY],
+        C_NORMAL_KEY: args[C_NORMAL_KEY],
+        C_TANGENT_U_KEY: args[C_TANGENT_U_KEY],
+        C_TANGENT_V_KEY: args[C_TANGENT_V_KEY],
+    }
+    contact_data = {k: jnp.asarray(v) for k, v in contact_data.items()}
+    contact_data[C_FORCE_KEY] = computeGlobalContactForce(contact_data[C_FORCE_KEY], contact_data[C_NORMAL_KEY], contact_data[C_TANGENT_U_KEY], contact_data[C_TANGENT_V_KEY])
     precomputed_params = {
         **constants,
         "smoothingLength": args["smoothingLength"],
         "particleDiameter": args["particleDiameter"],
     }
 
-    start = perf_counter()
-    particle_tree = KDTree(args[P_POS_KEY])
-    contact_tree = KDTree(args[C_POS_KEY])
-    print("Build Trees CPU time:", perf_counter() - start)
-    start = perf_counter()
-    _, pidx = particle_tree.query(
-        gridPoints, k=num_cutoff_particles, distance_upper_bound=3 * args["smoothingLength"], p=2, workers=-1
-    )
-    _, cidx = contact_tree.query(
-        gridPoints, k=num_cutoff_contacts, distance_upper_bound=args["smoothingLength"], p=jnp.inf, workers=-1
-    )
-    print("Tree query CPU time:", perf_counter() - start)
+    pidx, is_overflow_p = query_spatial_grid(build_spatial_grid(gridlimits, particle_data[P_POS_KEY], cell_size_particles), gridpoints, max_candidates=max_candidates_particles, max_neighbours=max_neighbours_particles, ord=2, batch_size=batch_size)
+    cidx, is_overflow_c = query_spatial_grid(build_spatial_grid(gridlimits, contact_data[C_POS_KEY], cell_size_contacts), gridpoints, max_candidates=max_candidates_contacts, max_neighbours=max_neighbours_contacts, ord=jnp.inf, batch_size=batch_size)
+    assert not (is_overflow_p.any() or is_overflow_c.any())
 
-    gridPoints = jnp.asarray(gridPoints)
+    gridpoints = jnp.asarray(gridpoints)
     pidx = jnp.asarray(pidx, dtype=jnp.int32)
     cidx = jnp.asarray(cidx, dtype=jnp.int32)
 
-    def run_batches(start_idx, end_idx, nb):
-        """Scans over nb equally sized batches of the gridpoints start_idx:end_idx."""
-        return coarse_graining_batched(
-            gridPoints[start_idx:end_idx].reshape(nb, -1, 3),
-            pidx[start_idx:end_idx].reshape(nb, -1, pidx.shape[1]),
-            cidx[start_idx:end_idx].reshape(nb, -1, cidx.shape[1]),
-            particle_data,
-            contact_data,
-            precomputed_params,
-        )
-
-    # To perform a batched scan of coarse graining calculations over gridpoints.
-    ng = gridPoints.shape[0]
-    nb = ng // batch_size
-    ng_batched = nb * batch_size
-    if nb > 0:
-        result_dict = run_batches(0, ng_batched, nb)
-    else:
-        result_dict = run_batches(0, ng, 1)
-
-    if nb == 0 or ng_batched == ng:
-        result_dict_rem = {k: jnp.array([]) for k in result_dict}
-    else:  # To handle remainder batch
-        result_dict_rem = run_batches(ng_batched, ng, 1)
-
-    cg_result = {}
-    for key, arr in result_dict.items():
-        arr_rem = result_dict_rem[key]
-        if key in [
-            F_MASS_DENSITY_KEY,
-            F_GRANULAR_TEMP_KEY,
-            F_PRESSURE_KEY,
-            F_VON_MISES_KEY,
-        ]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1)
-        elif key in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3)
-        elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
-
-    return {key: np.asarray(arr) for key, arr in cg_result.items()}
+    # To perform a batched map of coarse graining calculations over gridpoints.
+    fields = coarse_graining_mapped(gridpoints, pidx, cidx, particle_data, contact_data, precomputed_params, batch_size=batch_size)
+    return {key: np.asarray(arr) for key, arr in fields.items()}
