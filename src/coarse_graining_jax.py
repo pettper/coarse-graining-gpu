@@ -36,7 +36,7 @@ from .coarse_graining_constants import (
 )
 from .utils.spatial_grid_jax import build_spatial_grid, query_spatial_grid
 
-PARTICLE_PACKING_DENSITY = 0.75
+PARTICLE_PACKING_DENSITY = 0.80
 CONTACTS_PER_PARTICLE = 8
 
 
@@ -269,21 +269,21 @@ def coarseGrainingFields(gridpoints, gridlimits, args, batch_size=1000, debug_pr
             in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
 
-    def get_num_cutoff(V_cell, V_particle):
-        V_cutoff_grid = 27*V_cell
-        return ceil(PARTICLE_PACKING_DENSITY * V_cutoff_grid / V_particle)
+    def get_max_count(V_region, V_particle):
+        """Maximum number of particles in a region of volume V_region, given by the packing density."""
+        return ceil(PARTICLE_PACKING_DENSITY * V_region / V_particle)
 
     cell_size_particles = 3*args["smoothingLength"]
     cell_size_contacts = args["smoothingLength"]
-
-    # To determine the number of particles to include when approximating the cutoff |x| > 3*R (2-norm). rho * (box_volume / small sphere) -> rho * (3R)^3 / (r^3).
-    V_cell = (3*args["smoothingLength"])**3
     V_particle = (4/3)*pi*((0.5 * args["particleDiameter"]) ** 3)
-    num_cutoff_particles = get_num_cutoff(V_cell, V_particle)
 
-    # To determine the number of contacts to include when approximating the cutoff |x| > R (1-norm). rho * (box_volume / small_sphere_volume) -> rho * (8R)^3 / ((4/3)*pi*r^3).
-    V_cell = args["smoothingLength"]**3
-    num_cutoff_contacts = CONTACTS_PER_PARTICLE * get_num_cutoff(V_cell, V_particle)
+    # Particles: the candidates are the particles in the 27 cells around a gridpoint, and the neighbours are those within the cutoff |x - p| <= 3*R (2-norm).
+    max_candidates_particles = get_max_count(27 * cell_size_particles**3, V_particle)
+    max_neighbours_particles = get_max_count((4/3) * pi * cell_size_particles**3, V_particle)
+
+    # Contacts: the candidates are the contacts in the 27 cells around a gridpoint, and the neighbours are those within the cutoff |x - c| <= R (inf-norm).
+    max_candidates_contacts = CONTACTS_PER_PARTICLE * get_max_count(27 * cell_size_contacts**3, V_particle)
+    max_neighbours_contacts = CONTACTS_PER_PARTICLE * get_max_count((2 * cell_size_contacts)**3, V_particle)
 
     # Pre-compute some constants
     R = args["smoothingLength"]
@@ -294,28 +294,30 @@ def coarseGrainingFields(gridpoints, gridlimits, args, batch_size=1000, debug_pr
     }
 
     # To prepare the input for the coarse graining calculation
-    particle_data = {k: jnp.asarray(v) for k, v in args.items()}
     particle_data = {
         P_POS_KEY: args[P_POS_KEY],
         P_VEL_KEY: args[P_VEL_KEY],
         P_DISP_KEY: args[P_DISP_KEY],
         P_MASS_KEY: args[P_MASS_KEY].flatten(),
     }
-    # To rotate the contact forces to the global frame once per contact, rather than once per gridpoint and neighbour contact.
-    contact_data = {k: jnp.asarray(v) for k, v in args.items()}
+    particle_data = {k: jnp.asarray(v) for k, v in particle_data.items()}
     contact_data = {
-        C_FORCE_KEY: computeGlobalContactForce(args[C_FORCE_KEY], args[C_NORMAL_KEY], args[C_TANGENT_U_KEY], args[C_TANGENT_V_KEY]),
+        C_FORCE_KEY: args[C_FORCE_KEY],
         C_POS_KEY: args[C_POS_KEY],
         C_NORMAL_KEY: args[C_NORMAL_KEY],
+        C_TANGENT_U_KEY: args[C_TANGENT_U_KEY],
+        C_TANGENT_V_KEY: args[C_TANGENT_V_KEY],
     }
+    contact_data = {k: jnp.asarray(v) for k, v in contact_data.items()}
+    contact_data[C_FORCE_KEY] = computeGlobalContactForce(contact_data[C_FORCE_KEY], contact_data[C_NORMAL_KEY], contact_data[C_TANGENT_U_KEY], contact_data[C_TANGENT_V_KEY])
     precomputed_params = {
         **constants,
         "smoothingLength": args["smoothingLength"],
         "particleDiameter": args["particleDiameter"],
     }
 
-    pidx, is_overflow_p = query_spatial_grid(build_spatial_grid(gridlimits, args[P_POS_KEY], cell_size_particles), gridpoints, max_candidates=num_cutoff_particles, ord=2, batch_size=batch_size)
-    cidx, is_overflow_c = query_spatial_grid(build_spatial_grid(gridlimits, args[C_POS_KEY], cell_size_contacts), gridpoints, max_candidates=num_cutoff_contacts, ord=jnp.inf, batch_size=batch_size)
+    pidx, is_overflow_p = query_spatial_grid(build_spatial_grid(gridlimits, particle_data[P_POS_KEY], cell_size_particles), gridpoints, max_candidates=max_candidates_particles, max_neighbours=max_neighbours_particles, ord=2, batch_size=batch_size)
+    cidx, is_overflow_c = query_spatial_grid(build_spatial_grid(gridlimits, contact_data[C_POS_KEY], cell_size_contacts), gridpoints, max_candidates=max_candidates_contacts, max_neighbours=max_neighbours_contacts, ord=jnp.inf, batch_size=batch_size)
     assert not (is_overflow_p.any() or is_overflow_c.any())
 
     gridpoints = jnp.asarray(gridpoints)

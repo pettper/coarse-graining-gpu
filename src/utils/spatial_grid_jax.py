@@ -55,20 +55,21 @@ def build_spatial_grid(gridpoint_limits, particle_positions, cell_size_and_searc
     }
 
 
-@partial(jax.jit, static_argnames=("max_candidates", "ord", "batch_size"))
-def query_spatial_grid(grid, query_points, max_candidates, ord=2, batch_size=128):
+@partial(jax.jit, static_argnames=("max_candidates", "max_neighbours", "ord", "batch_size"))
+def query_spatial_grid(grid, query_points, max_candidates, max_neighbours, ord=2, batch_size=128):
     """
     Finds all particles within the search radius of each point, the result is exact where overflow is False.
-    CALL SEQUENCE: indices, overflow = query_spatial_grid(grid, query_points, max_candidates, ord=2, batch_size=128)
+    CALL SEQUENCE: indices, overflow = query_spatial_grid(grid, query_points, max_candidates, max_neighbours, ord=2, batch_size=128)
     INPUTS:
         grid: dict from build_spatial_grid.
         query_points: array of query points inside the gridpoint limits, size nq x 3.
         max_candidates: number of particles examined per point, must hold all particles in the 27 surrounding cells.
+        max_neighbours: number of particles returned per point, must hold all particles within the search radius.
         ord: norm used for distances, 2 or jnp.inf.
         batch_size: number of points processed in parallel, bounds memory use to about batch_size x max_candidates.
     OUTPUTS:
-        indices: particle indices in no particular order, size nq x max_candidates. Unused entries are set to N.
-        overflow: boolean array, size (nq,), True where particles were missed since max_candidates was too small.
+        indices: particle indices in no particular order, size nq x max_neighbours. Unused entries are set to N.
+        overflow: boolean array, size (nq,), True where particles were missed since max_candidates or max_neighbours was too small.
     """
 
     sorted_keys, order, dims = grid["sorted_keys"], grid["order"], grid["dims"]
@@ -88,15 +89,16 @@ def query_spatial_grid(grid, query_points, max_candidates, ord=2, batch_size=128
 
         # To construct the indices of the candidates to gather.
         range_length = range_end_idx - range_start_idx
-        num_candidates = jnp.sum(range_length)
         pick = jnp.ravel(range_start_idx[:, jnp.newaxis] + slot_indices)
         is_valid = jnp.ravel(slot_indices < range_length[:, jnp.newaxis])
 
-        # To keep the candidates within the search radius.
+        # To keep the candidates within the search radius, moved to the front of max_neighbours slots. Unused slots get keep = -1.
         dist = jnp.linalg.norm(grid["sorted_particles"][pick] - x, ord=ord, axis=-1)
         in_range = (is_valid) & (dist <= grid["cell_size"])
+        keep = jnp.nonzero(in_range, size=max_neighbours, fill_value=-1)[0]
+        indices = jnp.where(keep >= 0, order[pick[keep]], order.shape[0])
 
-        indices = jnp.where(in_range, order[pick], order.shape[0])
-        return indices, num_candidates > (9*max_particles_per_range)
+        overflow = jnp.any(range_length > max_particles_per_range) | (jnp.sum(in_range) > max_neighbours)
+        return indices, overflow
 
     return jax.lax.map(query_point, query_points, batch_size=batch_size)
