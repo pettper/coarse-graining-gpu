@@ -6,6 +6,7 @@
 #
 # 2025-12-04: First public version, programmed by Petter Persson.
 
+from functools import partial
 from math import pi, sqrt, ceil
 from time import perf_counter
 
@@ -238,89 +239,48 @@ def coarseGrainingFieldsAtPosition(
     deform_grad = computeDeformationGradient(M, x, p, massDensity, u, gaussianKernelFactor)
     strainTensor = jnp.multiply(0.5, jnp.add(deform_grad, deform_grad.T))
 
-    return (
-        massDensity,
-        momentumDensity,
-        velocity,
-        displacement,
-        granularTemperature,
-        pressure,
-        vonMisesStress,
-        stressTensor,
-        strainTensor,
-        rateOfStrainTensor,
-    )
-
-
-# Scan body compatible with jax.lax.scan
-@jax.jit
-def coarse_graining_body(carry, x):
-    """
-    Body function for jax.lax.scan function. See official documentation for jax.lax.scan.
-    INPUTS:
-        carry: Expects a tuple of dictionaries (particle_data, contact_data, precomputed_params) containing all particle data and pre-computed constants. Some of the
-            keys are defined in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
-        x: array of gridpoints, size ng x 3.
-    OUTPUTS:
-        carry: same as input.
-        fields: a dictionary containing all the computed fields. Keys are defined
-                in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
-    """
-
-    particle_data, contact_data, precomputed_params = carry
-
-    # Create a vectorized map over the input for the gridpoints x.
-    cg_vmap = jax.vmap(
-        coarseGrainingFieldsAtPosition,
-        in_axes=(0, 0, 0, None),
-    )
-
-    # Call coarse graining calculation to get all fields at x.
-    fields = cg_vmap(x, particle_data, contact_data, precomputed_params)
-
-    return carry, {
-        F_MASS_DENSITY_KEY: fields[0],
-        F_MOM_DENSITY_KEY: fields[1],
-        F_VEL_KEY: fields[2],
-        F_DISP_KEY: fields[3],
-        F_GRANULAR_TEMP_KEY: fields[4],
-        F_PRESSURE_KEY: fields[5],
-        F_VON_MISES_KEY: fields[6],
-        F_STRESS_KEY: fields[7],
-        F_STRAIN_KEY: fields[8],
-        F_RATE_OF_STRAIN_KEY: fields[9],
+    return {
+        F_MASS_DENSITY_KEY: massDensity,
+        F_MOM_DENSITY_KEY: momentumDensity,
+        F_VEL_KEY: velocity,
+        F_DISP_KEY: displacement,
+        F_GRANULAR_TEMP_KEY: granularTemperature,
+        F_PRESSURE_KEY: pressure,
+        F_VON_MISES_KEY: vonMisesStress,
+        F_STRESS_KEY: stressTensor,
+        F_STRAIN_KEY: strainTensor,
+        F_RATE_OF_STRAIN_KEY: rateOfStrainTensor,
     }
 
 
-@jax.jit
-def coarse_graining_batched(points_b, pidx_b, cidx_b, particle_data, contact_data, precomputed_params):
+@partial(jax.jit, static_argnames=("batch_size",))
+def coarse_graining_mapped(gridpoints, pidx, cidx, particle_data, contact_data, precomputed_params, batch_size):
     """
-    Runs coarse_graining_body over batches of gridpoints with jax.lax.scan, gathering the
-    neighbour data of each batch on the device.
+    Computes the coarse graining fields at every gridpoint with jax.lax.map, which splits the
+    gridpoints into batches of batch_size, vmaps over each batch and handles the remainder.
+    Each gridpoint gathers its own neighbour data on the device.
     INPUTS:
-        points_b: gridpoints, size (num_batches, batch_size, 3).
-        pidx_b: particle neighbour indices, size (num_batches, batch_size, kp).
-        cidx_b: contact neighbour indices, size (num_batches, batch_size, kc).
+        gridpoints: gridpoints, size (ng, 3).
+        pidx: particle neighbour indices, size (ng, kp).
+        cidx: contact neighbour indices, size (ng, kc).
         particle_data, contact_data: dicts with the full (unbatched) buffers.
         precomputed_params: dict with precomputed parameters.
+        batch_size: number of gridpoints computed in parallel.
     OUTPUTS:
-        fields: dict of fields, each of size (num_batches, batch_size, ...).
+        fields: dict of fields, each of size (ng, ...). Keys are defined
+            in "src/listeners/coarse_graining_calculation/coarse_graining_constants".
     """
+    num_particles = particle_data[P_POS_KEY].shape[0]
+    num_contacts = contact_data[C_POS_KEY].shape[0]
 
-    def scan_body(carry, batch):
-        x, bp, bc = batch
-        batch_particle_data = {key: buf[bp] for key, buf in particle_data.items()} | {
-            "validParticles": bp < particle_data[P_POS_KEY].shape[0]
-        }
-        batch_contact_data = {key: buf[bc] for key, buf in contact_data.items()} | {
-            "validContacts": bc < contact_data[C_POS_KEY].shape[0]
-        }
-        batch_carry = (batch_particle_data, batch_contact_data, precomputed_params)
-        _, fields = coarse_graining_body(batch_carry, x)
-        return carry, fields
-
-    _, fields = jax.lax.scan(scan_body, None, (points_b, pidx_b, cidx_b))
-    return fields
+    def fields_at_point(args):
+        x, ip, ic = args  # (3,), (kp,), (kc,)
+        input_particles_data = {key: buf[ip] for key, buf in particle_data.items()} | {"validParticles": ip < num_particles}
+        input_contact_data = {key: buf[ic] for key, buf in contact_data.items()} | {"validContacts": ic < num_contacts}
+        fields = coarseGrainingFieldsAtPosition(x, input_particles_data, input_contact_data, precomputed_params)
+        return fields
+    
+    return jax.lax.map(fields_at_point, (gridpoints, pidx, cidx), batch_size=batch_size)
 
 
 def coarseGrainingFields(gridpoints, gridlimits, args, batch_size=1000):
@@ -390,44 +350,6 @@ def coarseGrainingFields(gridpoints, gridlimits, args, batch_size=1000):
     pidx = jnp.asarray(pidx, dtype=jnp.int32)
     cidx = jnp.asarray(cidx, dtype=jnp.int32)
 
-    def run_batches(start_idx, end_idx, nb):
-        """Scans over nb equally sized batches of the gridpoints start_idx:end_idx."""
-        return coarse_graining_batched(
-            gridpoints[start_idx:end_idx].reshape(nb, -1, 3),
-            pidx[start_idx:end_idx].reshape(nb, -1, pidx.shape[1]),
-            cidx[start_idx:end_idx].reshape(nb, -1, cidx.shape[1]),
-            particle_data,
-            contact_data,
-            precomputed_params,
-        )
-
-    # To perform a batched scan of coarse graining calculations over gridpoints.
-    ng = gridpoints.shape[0]
-    nb = ng // batch_size
-    ng_batched = nb * batch_size
-    if nb > 0:
-        result_dict = run_batches(0, ng_batched, nb)
-    else:
-        result_dict = run_batches(0, ng, 1)
-
-    if nb == 0 or ng_batched == ng:
-        result_dict_rem = {k: jnp.array([]) for k in result_dict}
-    else:  # To handle remainder batch
-        result_dict_rem = run_batches(ng_batched, ng, 1)
-
-    cg_result = {}
-    for key, arr in result_dict.items():
-        arr_rem = result_dict_rem[key]
-        if key in [
-            F_MASS_DENSITY_KEY,
-            F_GRANULAR_TEMP_KEY,
-            F_PRESSURE_KEY,
-            F_VON_MISES_KEY,
-        ]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1)
-        elif key in [F_MOM_DENSITY_KEY, F_VEL_KEY, F_DISP_KEY]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3)
-        elif key in [F_STRESS_KEY, F_STRAIN_KEY, F_RATE_OF_STRAIN_KEY]:
-            cg_result[key] = jnp.concatenate((arr.ravel(), arr_rem.ravel()), axis=0).reshape(-1, 3, 3)
-
-    return {key: np.asarray(arr) for key, arr in cg_result.items()}
+    # To perform a batched map of coarse graining calculations over gridpoints.
+    fields = coarse_graining_mapped(gridpoints, pidx, cidx, particle_data, contact_data, precomputed_params, batch_size=batch_size)
+    return {key: np.asarray(arr) for key, arr in fields.items()}
