@@ -6,12 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "coarse-graining-gpu"
 version = "0.1.0"
 description = "A small GPU-accelerated coarse graining library"
-requires-python = ">=3.9"
-dependencies = ["jax[cuda13]", "numpy", "scipy"]
+requires-python = ">=3.11"
+dependencies = ["jax[cuda13]", "numpy", "scipy", "warp-lang"]
 
 [tool.setuptools]
-packages = ["coarse_graining_gpu", "coarse_graining_gpu.src"]
+packages = [
+    "coarse_graining_gpu",
+    "coarse_graining_gpu.src",
+    "coarse_graining_gpu.src.utils",
+]
 
 [tool.setuptools.package-dir]
 coarse_graining_gpu = "."
 "coarse_graining_gpu.src" = "src"
+"coarse_graining_gpu.src.utils" = "src/utils"
