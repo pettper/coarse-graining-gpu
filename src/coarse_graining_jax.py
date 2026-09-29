@@ -36,7 +36,7 @@ from .coarse_graining_constants import (
 )
 from .utils.spatial_grid_jax import build_spatial_grid, query_spatial_grid
 
-PARTICLE_PACKING_DENSITY = 0.80
+PARTICLE_PACKING_DENSITY = 0.85
 CONTACTS_PER_PARTICLE = 8
 
 
