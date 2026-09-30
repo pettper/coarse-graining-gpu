@@ -95,9 +95,6 @@ class CoarseGrainingMain:
             "smoothingLength": smoothing_length,
         }
 
-        if self.debug_prints_on:
-            print(f"NUM_CUTOFF_PARTICLES={int(os.environ.get('NUM_CUTOFF_PARTICLES', '1500'))}")
-
         # To handle adaptive buffer sizes
         self.particle_buffer_size = self.STANDARD_PARTICLE_BUFFER_SIZE
         self.contact_buffer_size = self.STANDARD_PARTICLE_BUFFER_SIZE
